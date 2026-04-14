@@ -16,7 +16,7 @@ IMPORTED_ADJ    = 0.13
 # LOGIN
 # ─────────────────────────────────────────────
 
-    USERS = {
+USERS = {
     "hamza":   {"password": st.secrets.get("#hamza.123*lhr186.xyz",   ""), "role": "admin",   "name": "Hamza"},
    
 }
