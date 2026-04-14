@@ -16,9 +16,10 @@ IMPORTED_ADJ    = 0.13
 # LOGIN
 # ─────────────────────────────────────────────
 USERS = {
-    "hamza":   {"password": "mitiles2024", "role": "admin",   "name": "Hamza"},
-    "manager": {"password": "manager123",  "role": "manager", "name": "Manager"},
-    "sales":   {"password": "sales123",    "role": "sales",   "name": "Sales Team"},
+    USERS = {
+    "hamza":   {"password": st.secrets.get("#hamza.123*lhr186.xyz",   ""), "role": "admin",   "name": "Hamza"},
+   
+}
 }
 
 def login():
@@ -53,8 +54,17 @@ is_admin = st.session_state['role'] == 'admin'
 def load_data(path):
     import requests, io
     if path.startswith("http"):
-        response = requests.get(path, timeout=30, allow_redirects=True, headers={'User-Agent': 'Mozilla/5.0'})
-        file = io.BytesIO(response.content)
+        try:
+            response = requests.get(
+                path, timeout=60,
+                allow_redirects=True,
+                headers={'User-Agent': 'Mozilla/5.0'}
+            )
+            response.raise_for_status()
+            file = io.BytesIO(response.content)
+        except Exception as e:
+            st.error(f"Failed to load data from OneDrive: {e}")
+            st.stop()
         df   = pd.read_excel(file, sheet_name='SALE HISTORY')
         file.seek(0)
         prod = pd.read_excel(file, sheet_name='PRODUCT DATA')
