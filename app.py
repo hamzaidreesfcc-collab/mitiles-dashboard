@@ -15,12 +15,12 @@ IMPORTED_ADJ    = 0.13
 # ─────────────────────────────────────────────
 # LOGIN
 # ─────────────────────────────────────────────
-USERS = {
+
     USERS = {
     "hamza":   {"password": st.secrets.get("#hamza.123*lhr186.xyz",   ""), "role": "admin",   "name": "Hamza"},
    
 }
-}
+
 
 def login():
     st.markdown("<div style='text-align:center;padding:60px 0 20px'><h1>🏠 Mi-Tiles</h1><h3 style='color:gray'>Inventory Intelligence Dashboard</h3></div>", unsafe_allow_html=True)
