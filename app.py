@@ -29,14 +29,13 @@ def login():
         u = st.text_input("Username")
         p = st.text_input("Password", type="password")
         if st.button("Login", use_container_width=True):
-    st.write(f"Stored password length: {len(USERS.get('hamza', {}).get('password', 'NOT FOUND'))}")
-    st.write(f"Entered password length: {len(p)}")
-        if u in USERS and USERS[u]["password"] == p:
+            st.write(f"Stored length: {len(USERS.get('hamza', {}).get('password', 'NOT FOUND'))}")
+            st.write(f"Entered length: {len(p)}")
+            if u in USERS and USERS[u]["password"] == p:
                 st.session_state.update({'logged_in':True,'user':u,'role':USERS[u]["role"],'name':USERS[u]["name"],'last_active':time.time()})
                 st.rerun()
             else:
                 st.error("Invalid username or password")
-
 def check_session():
     if 'last_active' in st.session_state:
         if time.time() - st.session_state['last_active'] > SESSION_TIMEOUT:
