@@ -51,8 +51,16 @@ is_admin = st.session_state['role'] == 'admin'
 # ─────────────────────────────────────────────
 @st.cache_data(ttl=3600)
 def load_data(path):
-    df   = pd.read_excel(path, sheet_name='SALE HISTORY')
-    prod = pd.read_excel(path, sheet_name='PRODUCT DATA')
+    import requests, io
+    if path.startswith("http"):
+        response = requests.get(path, timeout=30, allow_redirects=True, headers={'User-Agent': 'Mozilla/5.0'})
+        file = io.BytesIO(response.content)
+        df   = pd.read_excel(file, sheet_name='SALE HISTORY')
+        file.seek(0)
+        prod = pd.read_excel(file, sheet_name='PRODUCT DATA')
+    else:
+        df   = pd.read_excel(path, sheet_name='SALE HISTORY')
+        prod = pd.read_excel(path, sheet_name='PRODUCT DATA')
 
     df['Date']       = pd.to_datetime(df['Date'].str.strip(), format='%d-%m-%Y   %I:%M %p', errors='coerce')
     df['Sale Day']   = df['Date'].dt.date
