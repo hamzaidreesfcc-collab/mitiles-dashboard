@@ -29,8 +29,7 @@ def login():
         u = st.text_input("Username")
         p = st.text_input("Password", type="password")
         if st.button("Login", use_container_width=True):
-            st.write(f"Stored length: {len(USERS.get('hamza', {}).get('password', 'NOT FOUND'))}")
-            st.write(f"Entered length: {len(p)}")
+            
             if u in USERS and USERS[u]["password"] == p:
                 st.session_state.update({'logged_in':True,'user':u,'role':USERS[u]["role"],'name':USERS[u]["name"],'last_active':time.time()})
                 st.rerun()
