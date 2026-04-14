@@ -17,10 +17,9 @@ IMPORTED_ADJ    = 0.13
 # ─────────────────────────────────────────────
 
 USERS = {
-    "hamza":   {"password": st.secrets.get("#hamza.123*lhr186.xyz",   ""), "role": "admin",   "name": "Hamza"},
-   
+    "hamza": {"password": st.secrets.get("PASS_HAMZA", ""), "role": "admin", "name": "Hamza"},
 }
-st.write(st.secrets)
+
 
 
 def login():
