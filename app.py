@@ -124,7 +124,7 @@ def build_pi(_df, _prod):
         fp  = pur['Date'].min() if len(pur)>0 else pd.NaT
         ls  = sal['Date'].max() if len(sal)>0 else pd.NaT
         di  = int((today-fp).days)  if pd.notna(fp) else None
-        ds  = int((today-ls).days)  if pd.notna(ls) else None
+        ds  = int((today-pd.Timestamp(ls)).days) if pd.notna(ls) else None
         cs  = g.sort_values('Date').iloc[-1]['Closing'] if len(g)>0 else 0
         ts  = sal['Sq.m'].sum()
         ns  = max(0, ts - ret['Sq.m'].sum())
