@@ -80,7 +80,7 @@ def load_data(path):
         st.error(f"Failed to load data: {e}")
         st.stop()
 
-   df   = pd.read_excel(buffer, sheet_name='SALE HISTORY')
+    df   = pd.read_excel(buffer, sheet_name='SALE HISTORY')
     buffer.seek(0)
     prod = pd.read_excel(buffer, sheet_name='PRODUCT DATA')
 
