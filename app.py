@@ -86,9 +86,33 @@ def load_data(path):
 
     # Force date parsing
     df['Date'] = pd.to_datetime(df['Date'].astype(str).str.strip(), format='%d-%m-%Y   %I:%M %p', errors='coerce')
+    df['Sale Day'] = df['Date'].dt.date
+    df['Month']    = df['Date'].dt.to_period('M').astype(str)
+    df['Year']     = df['Date'].dt.year
+    df['Bill No.'] = df['Bill No.'].astype(str)
+    df['Account Name'] = df['Account Name'].astype(str).str.replace('\xa0',' ').str.strip()
+
+    for col in ['Sq.m','Rate','Closing','Profit','SALE','RETURN','GROSS PROFIT','NET SALE']:
+        df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0)
+
+    df['Product No.']  = df['Product No.'].astype(str).str.replace('\xa0',' ').str.strip()
+    prod['Product No.']= prod['Product No.'].astype(str).str.replace('\xa0',' ').str.strip()
+
+    if 'Size' in df.columns: df = df.drop(columns=['Size'])
+    df = df.merge(prod[['Product No.','Brand Name','Category','Sub-Category','Size','Company Name','Sq.m/Box']], on='Product No.', how='left')
+
+    purch = df[df['Type'].isin(['P','O.S'])].copy()
+    wac   = purch.groupby('Product No.').apply(lambda x: (x['Sq.m']*x['Rate']).sum()/x['Sq.m'].sum() if x['Sq.m'].sum()>0 else 0).reset_index()
+    wac.columns = ['Product No.','WAC Rate']
+    df = df.merge(wac, on='Product No.', how='left')
+    df['WAC Rate'] = df['WAC Rate'].fillna(0)
+
+    def ap(row):
+        adj = LOCAL_ADJ if 'LOCAL' in str(row.get('Category','')).upper() else IMPORTED_ADJ
+        return row['SALE'] - row['Sq.m'] * row['WAC Rate'] * (1 - adj)
+    df['Actual Profit'] = df.apply(ap, axis=1)
 
     return df, prod
-
     df['Date']       = pd.to_datetime(df['Date'].str.strip(), format='%d-%m-%Y   %I:%M %p', errors='coerce')
     df['Sale Day']   = df['Date'].dt.date
     df['Month']      = df['Date'].dt.to_period('M').astype(str)
