@@ -66,7 +66,7 @@ def load_data(path):
         creds.refresh(auth_req)
 
         file_id = st.secrets.get("GOOGLE_FILE_ID", "1tyUCZojpgSXJ333Gd1McNDTogtWSFxhl")
-        download_url = f"https://www.googleapis.com/drive/v3/files/{file_id}?alt=media"
+        download_url = f"https://docs.google.com/spreadsheets/d/{file_id}/export?format=xlsx"
 
         response = requests.get(
             download_url,
