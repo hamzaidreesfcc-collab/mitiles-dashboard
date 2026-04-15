@@ -60,27 +60,30 @@ def load_data(path):
     try:
         creds = service_account.Credentials.from_service_account_info(
             st.secrets["gcp_service_account"],
-            scopes=["https://www.googleapis.com/auth/drive.readonly",
-                    "https://www.googleapis.com/auth/spreadsheets.readonly"]
+            scopes=["https://www.googleapis.com/auth/drive.readonly"]
         )
         auth_req = google.auth.transport.requests.Request()
         creds.refresh(auth_req)
-        st.write(f"Token obtained: {creds.token[:20]}...")
-        st.write(f"Service account: {creds.service_account_email}")
-        
-        file_id = "1tyUCZojpgSXJ333Gd1McNDTogtWSFxhl"
-        
-        # Try files.get first to check access
-        check_url = f"https://www.googleapis.com/drive/v3/files/{file_id}"
-        check = requests.get(check_url, headers={"Authorization": f"Bearer {creds.token}"})
-        st.write(f"File check status: {check.status_code}")
-        st.write(f"File check response: {check.text[:200]}")
+
+        file_id = st.secrets.get("GOOGLE_FILE_ID", "1tyUCZojpgSXJ333Gd1McNDTogtWSFxhl")
+        download_url = f"https://www.googleapis.com/drive/v3/files/{file_id}?alt=media"
+
+        response = requests.get(
+            download_url,
+            headers={"Authorization": f"Bearer {creds.token}"},
+            timeout=60
+        )
+        response.raise_for_status()
+        buffer = io.BytesIO(response.content)
 
     except Exception as e:
-        st.error(f"Debug error: {e}")
+        st.error(f"Failed to load data: {e}")
         st.stop()
-    
-    st.stop()
+
+    df   = pd.read_excel(buffer, sheet_name='SALE HISTORY')
+    buffer.seek(0)
+    prod = pd.read_excel(buffer, sheet_name='PRODUCT DATA')
+    return df, prod
 
     df['Date']       = pd.to_datetime(df['Date'].str.strip(), format='%d-%m-%Y   %I:%M %p', errors='coerce')
     df['Sale Day']   = df['Date'].dt.date
