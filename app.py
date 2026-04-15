@@ -65,26 +65,22 @@ def load_data(path):
         )
         auth_req = google.auth.transport.requests.Request()
         creds.refresh(auth_req)
+        st.write(f"Token obtained: {creds.token[:20]}...")
+        st.write(f"Service account: {creds.service_account_email}")
         
-        file_id = st.secrets.get("GOOGLE_FILE_ID", "1tyUCZojpgSXJ333Gd1McNDTogtWSFxhl")
-        export_url = f"https://docs.google.com/spreadsheets/d/{file_id}/export?format=xlsx&id={file_id}"
+        file_id = "1tyUCZojpgSXJ333Gd1McNDTogtWSFxhl"
         
-        response = requests.get(
-            export_url,
-            headers={"Authorization": f"Bearer {creds.token}"},
-            timeout=60
-        )
-        response.raise_for_status()
-        buffer = io.BytesIO(response.content)
+        # Try files.get first to check access
+        check_url = f"https://www.googleapis.com/drive/v3/files/{file_id}"
+        check = requests.get(check_url, headers={"Authorization": f"Bearer {creds.token}"})
+        st.write(f"File check status: {check.status_code}")
+        st.write(f"File check response: {check.text[:200]}")
 
     except Exception as e:
-        st.error(f"Failed to load data: {e}")
+        st.error(f"Debug error: {e}")
         st.stop()
-
-    df   = pd.read_excel(buffer, sheet_name='SALE HISTORY')
-    buffer.seek(0)
-    prod = pd.read_excel(buffer, sheet_name='PRODUCT DATA')
-    return df, prod
+    
+    st.stop()
 
     df['Date']       = pd.to_datetime(df['Date'].str.strip(), format='%d-%m-%Y   %I:%M %p', errors='coerce')
     df['Sale Day']   = df['Date'].dt.date
