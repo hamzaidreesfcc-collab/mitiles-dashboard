@@ -55,22 +55,28 @@ def load_data(path):
     import io
     import requests
     from google.oauth2 import service_account
+    import google.auth.transport.requests
 
     try:
-        credentials = service_account.Credentials.from_service_account_info(
+        creds = service_account.Credentials.from_service_account_info(
             st.secrets["gcp_service_account"],
-            scopes=["https://www.googleapis.com/auth/spreadsheets.readonly"]
+            scopes=["https://www.googleapis.com/auth/drive.readonly",
+                    "https://www.googleapis.com/auth/spreadsheets.readonly"]
         )
+        auth_req = google.auth.transport.requests.Request()
+        creds.refresh(auth_req)
+        
         file_id = st.secrets.get("GOOGLE_FILE_ID", "1tyUCZojpgSXJ333Gd1McNDTogtWSFxhl")
-        export_url = f"https://docs.google.com/spreadsheets/d/{file_id}/export?format=xlsx"
+        export_url = f"https://docs.google.com/spreadsheets/d/{file_id}/export?format=xlsx&id={file_id}"
         
-        # Get access token
-        credentials.refresh(google.auth.transport.requests.Request())
-        headers = {"Authorization": f"Bearer {credentials.token}"}
-        
-        response = requests.get(export_url, headers=headers, timeout=60)
+        response = requests.get(
+            export_url,
+            headers={"Authorization": f"Bearer {creds.token}"},
+            timeout=60
+        )
         response.raise_for_status()
         buffer = io.BytesIO(response.content)
+
     except Exception as e:
         st.error(f"Failed to load data: {e}")
         st.stop()
