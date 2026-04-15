@@ -80,9 +80,13 @@ def load_data(path):
         st.error(f"Failed to load data: {e}")
         st.stop()
 
-    df   = pd.read_excel(buffer, sheet_name='SALE HISTORY')
+   df   = pd.read_excel(buffer, sheet_name='SALE HISTORY')
     buffer.seek(0)
     prod = pd.read_excel(buffer, sheet_name='PRODUCT DATA')
+
+    # Force date parsing
+    df['Date'] = pd.to_datetime(df['Date'].astype(str).str.strip(), format='%d-%m-%Y   %I:%M %p', errors='coerce')
+
     return df, prod
 
     df['Date']       = pd.to_datetime(df['Date'].str.strip(), format='%d-%m-%Y   %I:%M %p', errors='coerce')
