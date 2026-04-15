@@ -58,14 +58,17 @@ def load_data(path):
     from googleapiclient.http import MediaIoBaseDownload
 
     try:
-        # Use service account credentials
+       # Use service account credentials
         credentials = service_account.Credentials.from_service_account_info(
             st.secrets["gcp_service_account"],
             scopes=["https://www.googleapis.com/auth/drive.readonly"]
         )
         service = build("drive", "v3", credentials=credentials)
         file_id = st.secrets.get("GOOGLE_FILE_ID", "1tyUCZojpgSXJ333Gd1McNDTogtWSFxhl")
-        request = service.files().get_media(fileId=file_id)
+        request = service.files().export_media(
+            fileId=file_id,
+            mimeType='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+        )
         buffer = io.BytesIO()
         downloader = MediaIoBaseDownload(buffer, request)
         done = False
