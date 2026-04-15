@@ -4,7 +4,7 @@ import numpy as np
 from datetime import datetime, timedelta
 from itertools import combinations
 import time
-
+import google.auth.transport.requests
 st.set_page_config(page_title="Mi-Tiles Intelligence", page_icon="🏠", layout="wide", initial_sidebar_state="expanded")
 
 DATA_PATH = st.secrets.get("DATA_PATH", r"C:\Users\hp\OneDrive\Desktop\5.3.25.xlsx")
@@ -53,28 +53,24 @@ is_admin = st.session_state['role'] == 'admin'
 @st.cache_data(ttl=3600)
 def load_data(path):
     import io
+    import requests
     from google.oauth2 import service_account
-    from googleapiclient.discovery import build
-    from googleapiclient.http import MediaIoBaseDownload
 
     try:
-       # Use service account credentials
         credentials = service_account.Credentials.from_service_account_info(
             st.secrets["gcp_service_account"],
-            scopes=["https://www.googleapis.com/auth/drive.readonly"]
+            scopes=["https://www.googleapis.com/auth/spreadsheets.readonly"]
         )
-        service = build("drive", "v3", credentials=credentials)
         file_id = st.secrets.get("GOOGLE_FILE_ID", "1tyUCZojpgSXJ333Gd1McNDTogtWSFxhl")
-        request = service.files().export_media(
-            fileId=file_id,
-            mimeType='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
-        )
-        buffer = io.BytesIO()
-        downloader = MediaIoBaseDownload(buffer, request)
-        done = False
-        while not done:
-            _, done = downloader.next_chunk()
-        buffer.seek(0)
+        export_url = f"https://docs.google.com/spreadsheets/d/{file_id}/export?format=xlsx"
+        
+        # Get access token
+        credentials.refresh(google.auth.transport.requests.Request())
+        headers = {"Authorization": f"Bearer {credentials.token}"}
+        
+        response = requests.get(export_url, headers=headers, timeout=60)
+        response.raise_for_status()
+        buffer = io.BytesIO(response.content)
     except Exception as e:
         st.error(f"Failed to load data: {e}")
         st.stop()
