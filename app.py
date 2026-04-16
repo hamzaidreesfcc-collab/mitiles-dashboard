@@ -94,6 +94,12 @@ def load_data(path):
 
     for col in ['Sq.m','Rate','Closing','Profit','SALE','RETURN','GROSS PROFIT','NET SALE']:
         df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0)
+    
+    # Recalculate SALE and RETURN from raw columns if they're zero
+    sale_mask = (df['SALE'] == 0) & (df['Type'] == 'S')
+    df.loc[sale_mask, 'SALE'] = df.loc[sale_mask, 'Sq.m'] * df.loc[sale_mask, 'Rate']
+    ret_mask = (df['RETURN'] == 0) & (df['Type'] == 'S.R')
+    df.loc[ret_mask, 'RETURN'] = df.loc[ret_mask, 'Sq.m'] * df.loc[ret_mask, 'Rate']
 
     df['Product No.']  = df['Product No.'].astype(str).str.replace('\xa0',' ').str.strip()
     prod['Product No.']= prod['Product No.'].astype(str).str.replace('\xa0',' ').str.strip()
