@@ -141,11 +141,19 @@ def load_data(path):
         )
 
         response.raise_for_status()
+
         buffer = io.BytesIO(response.content)
 
     except Exception as e:
+
         st.error(f"Failed to load data: {e}")
+
         st.stop()
+
+
+    # ----------------------------
+    # LOAD SHEETS
+    # ----------------------------
 
     df = pd.read_excel(buffer, sheet_name='SALE HISTORY')
 
@@ -153,47 +161,62 @@ def load_data(path):
 
     prod = pd.read_excel(buffer, sheet_name='PRODUCT DATA')
 
-    # -----------------------------
-    # CLEAN DATE
-    # -----------------------------
+
+    # ----------------------------
+    # CLEAN DATE COLUMN
+    # ----------------------------
 
     df['Date'] = pd.to_datetime(
-        df['Date'].astype(str).str.replace('\xa0',' ').str.strip(),
-        errors='coerce',
-        dayfirst=True
+        df['Date']
+        .astype(str)
+        .str.replace('\xa0',' ')
+        .str.strip(),
+        dayfirst=True,
+        errors='coerce'
     )
 
     df = df[df['Date'].notna()]
 
-    # -----------------------------
+
+    # ----------------------------
     # CLEAN TEXT FIELDS
-    # -----------------------------
+    # ----------------------------
 
     df['Product No.'] = df['Product No.'].astype(str).str.strip()
+
     df['Bill No.'] = df['Bill No.'].astype(str).str.strip()
-    df['Account Name'] = df['Account Name'].astype(str).str.replace('\xa0',' ').str.strip()
 
-    # -----------------------------
-    # SORT TRANSACTIONS
-    # -----------------------------
+    df['Account Name'] = (
+        df['Account Name']
+        .astype(str)
+        .str.replace('\xa0',' ')
+        .str.strip()
+    )
 
-    df = df.sort_values(
-        by=['Product No.','Date','Bill No.'],
-        ascending=[True,True,True],
-        kind='mergesort'
-    ).reset_index(drop=True)
 
-    # -----------------------------
-    # DATE DIMENSIONS
-    # -----------------------------
+    # ----------------------------
+    # CLEAN PRODUCT NUMBER
+    # ----------------------------
 
-    df['Sale Day'] = df['Date'].dt.date
-    df['Month'] = df['Date'].dt.to_period('M').astype(str)
-    df['Year'] = df['Date'].dt.year
+    df['Product No.'] = df['Product No.'].apply(_clean_prod)
 
-    # -----------------------------
-    # NUMERIC COLUMNS
-    # -----------------------------
+    prod['Product No.'] = prod['Product No.'].apply(_clean_prod)
+
+
+    # ----------------------------
+    # REMOVE ERP NON-STOCK TYPES
+    # ----------------------------
+
+    valid_types = ['P','S','S.R','P.R','O.S']
+
+    if 'Type' in df.columns:
+
+        df = df[df['Type'].isin(valid_types)]
+
+
+    # ----------------------------
+    # NUMERIC CONVERSION
+    # ----------------------------
 
     numeric_cols = [
         'Sq.m',
@@ -211,39 +234,72 @@ def load_data(path):
         if col in df.columns:
 
             df[col] = pd.to_numeric(
-                df[col].astype(str).str.replace(',',''),
+                df[col]
+                .astype(str)
+                .str.replace(',',''),
                 errors='coerce'
             ).fillna(0)
 
-    # -----------------------------
-    # SALES / RETURN VALUE FIX
-    # -----------------------------
+
+    # ----------------------------
+    # SORT TRANSACTIONS
+    # ----------------------------
+
+    sort_cols = ['Product No.','Date']
+
+    if 'Invoice No.' in df.columns:
+
+        sort_cols.append('Invoice No.')
+
+    df = df.sort_values(
+        by=sort_cols,
+        kind='mergesort'
+    ).reset_index(drop=True)
+
+
+    # ----------------------------
+    # DATE DIMENSIONS
+    # ----------------------------
+
+    df['Sale Day'] = df['Date'].dt.date
+
+    df['Month'] = df['Date'].dt.to_period('M').astype(str)
+
+    df['Year'] = df['Date'].dt.year
+
+
+    # ----------------------------
+    # FIX SALES VALUE
+    # ----------------------------
 
     sale_mask = (df['SALE'] == 0) & (df['Type'] == 'S')
 
     df.loc[sale_mask, 'SALE'] = (
-        df.loc[sale_mask, 'Sq.m'] *
-        df.loc[sale_mask, 'Rate']
+        df.loc[sale_mask, 'Sq.m']
+        * df.loc[sale_mask, 'Rate']
     )
+
+
+    # ----------------------------
+    # FIX RETURN VALUE
+    # ----------------------------
 
     ret_mask = (df['RETURN'] == 0) & (df['Type'] == 'S.R')
 
     df.loc[ret_mask, 'RETURN'] = (
-        df.loc[ret_mask, 'Sq.m'] *
-        df.loc[ret_mask, 'Rate']
+        df.loc[ret_mask, 'Sq.m']
+        * df.loc[ret_mask, 'Rate']
     )
 
-    # -----------------------------
-    # CLEAN PRODUCT NUMBER
-    # -----------------------------
 
-    df['Product No.'] = df['Product No.'].apply(_clean_prod)
-
-    prod['Product No.'] = prod['Product No.'].apply(_clean_prod)
+    # ----------------------------
+    # MERGE PRODUCT MASTER
+    # ----------------------------
 
     if 'Size' in df.columns:
 
         df = df.drop(columns=['Size'])
+
 
     df = df.merge(
         prod[
@@ -261,16 +317,20 @@ def load_data(path):
         how='left'
     )
 
-    # -----------------------------
+
+    # ----------------------------
     # WAC CALCULATION
-    # -----------------------------
+    # ----------------------------
 
     purch = df[df['Type'].isin(['P','O.S'])].copy()
 
     wac = purch.groupby('Product No.').apply(
+
         lambda x:
         (x['Sq.m'] * x['Rate']).sum() / x['Sq.m'].sum()
+
         if x['Sq.m'].sum() > 0 else 0
+
     ).reset_index()
 
     wac.columns = ['Product No.','WAC Rate']
@@ -278,6 +338,7 @@ def load_data(path):
     df = df.merge(wac, on='Product No.', how='left')
 
     df['WAC Rate'] = df['WAC Rate'].fillna(0)
+
 
     return df, prod
 
