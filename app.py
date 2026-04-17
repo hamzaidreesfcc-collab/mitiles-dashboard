@@ -112,6 +112,7 @@ def _clean_prod(x):
 
 @st.cache_data(ttl=3600)
 def load_data(path):
+
     import io
     import requests
     from google.oauth2 import service_account
@@ -122,13 +123,23 @@ def load_data(path):
             st.secrets["gcp_service_account"],
             scopes=["https://www.googleapis.com/auth/drive.readonly"]
         )
+
         auth_req = google.auth.transport.requests.Request()
         creds.refresh(auth_req)
 
-        file_id = st.secrets.get("GOOGLE_FILE_ID", "1ikdIp0wAtDD8B2PCDTc0X_cyxyXwaolLw_HTZtnT6No")
+        file_id = st.secrets.get(
+            "GOOGLE_FILE_ID",
+            "1ikdIp0wAtDD8B2PCDTc0X_cyxyXwaolLw_HTZtnT6No"
+        )
+
         download_url = f"https://docs.google.com/spreadsheets/d/{file_id}/export?format=xlsx"
 
-        response = requests.get(download_url, headers={"Authorization": f"Bearer {creds.token}"}, timeout=60)
+        response = requests.get(
+            download_url,
+            headers={"Authorization": f"Bearer {creds.token}"},
+            timeout=60
+        )
+
         response.raise_for_status()
         buffer = io.BytesIO(response.content)
 
@@ -136,52 +147,139 @@ def load_data(path):
         st.error(f"Failed to load data: {e}")
         st.stop()
 
-    df   = pd.read_excel(buffer, sheet_name='SALE HISTORY')
+    df = pd.read_excel(buffer, sheet_name='SALE HISTORY')
+
     buffer.seek(0)
+
     prod = pd.read_excel(buffer, sheet_name='PRODUCT DATA')
 
-    df['Date']       = df['Date'].apply(_parse_date)
-    # Ensure correct data types before sorting
-df['Product No.'] = df['Product No.'].astype(str).fillna('')
-df['Bill No.'] = df['Bill No.'].astype(str).fillna('')
+    # -----------------------------
+    # CLEAN DATE
+    # -----------------------------
 
-# Remove rows where Date failed to parse
-df = df[df['Date'].notna()]
+    df['Date'] = pd.to_datetime(
+        df['Date'].astype(str).str.replace('\xa0',' ').str.strip(),
+        errors='coerce',
+        dayfirst=True
+    )
 
-# Now sort safely
-df = df.sort_values(
-    by=['Product No.','Date','Bill No.'],
-    ascending=[True,True,True],
-    kind='mergesort'
-).reset_index(drop=True)
+    df = df[df['Date'].notna()]
 
-df['Date'] = pd.to_datetime(df['Date'], errors='coerce', dayfirst=True)
+    # -----------------------------
+    # CLEAN TEXT FIELDS
+    # -----------------------------
 
-    df['Sale Day']   = df['Date'].dt.date
-    df['Month']      = df['Date'].dt.to_period('M').astype(str)
-    df['Year']       = df['Date'].dt.year
-    df['Bill No.']   = df['Bill No.'].astype(str)
+    df['Product No.'] = df['Product No.'].astype(str).str.strip()
+    df['Bill No.'] = df['Bill No.'].astype(str).str.strip()
     df['Account Name'] = df['Account Name'].astype(str).str.replace('\xa0',' ').str.strip()
 
-    for col in ['Sq.m','Rate','Closing','Profit','SALE','RETURN','GROSS PROFIT','NET SALE']:
-        df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0)
+    # -----------------------------
+    # SORT TRANSACTIONS
+    # -----------------------------
+
+    df = df.sort_values(
+        by=['Product No.','Date','Bill No.'],
+        ascending=[True,True,True],
+        kind='mergesort'
+    ).reset_index(drop=True)
+
+    # -----------------------------
+    # DATE DIMENSIONS
+    # -----------------------------
+
+    df['Sale Day'] = df['Date'].dt.date
+    df['Month'] = df['Date'].dt.to_period('M').astype(str)
+    df['Year'] = df['Date'].dt.year
+
+    # -----------------------------
+    # NUMERIC COLUMNS
+    # -----------------------------
+
+    numeric_cols = [
+        'Sq.m',
+        'Rate',
+        'Closing',
+        'Profit',
+        'SALE',
+        'RETURN',
+        'GROSS PROFIT',
+        'NET SALE'
+    ]
+
+    for col in numeric_cols:
+
+        if col in df.columns:
+
+            df[col] = pd.to_numeric(
+                df[col].astype(str).str.replace(',',''),
+                errors='coerce'
+            ).fillna(0)
+
+    # -----------------------------
+    # SALES / RETURN VALUE FIX
+    # -----------------------------
 
     sale_mask = (df['SALE'] == 0) & (df['Type'] == 'S')
-    df.loc[sale_mask, 'SALE'] = df.loc[sale_mask, 'Sq.m'] * df.loc[sale_mask, 'Rate']
-    ret_mask = (df['RETURN'] == 0) & (df['Type'] == 'S.R')
-    df.loc[ret_mask, 'RETURN'] = df.loc[ret_mask, 'Sq.m'] * df.loc[ret_mask, 'Rate']
 
-    df['Product No.']   = df['Product No.'].apply(_clean_prod)
+    df.loc[sale_mask, 'SALE'] = (
+        df.loc[sale_mask, 'Sq.m'] *
+        df.loc[sale_mask, 'Rate']
+    )
+
+    ret_mask = (df['RETURN'] == 0) & (df['Type'] == 'S.R')
+
+    df.loc[ret_mask, 'RETURN'] = (
+        df.loc[ret_mask, 'Sq.m'] *
+        df.loc[ret_mask, 'Rate']
+    )
+
+    # -----------------------------
+    # CLEAN PRODUCT NUMBER
+    # -----------------------------
+
+    df['Product No.'] = df['Product No.'].apply(_clean_prod)
+
     prod['Product No.'] = prod['Product No.'].apply(_clean_prod)
 
-    if 'Size' in df.columns: df = df.drop(columns=['Size'])
-    df = df.merge(prod[['Product No.','Brand Name','Category','Sub-Category','Size','Company Name','Sq.m/Box']], on='Product No.', how='left')
+    if 'Size' in df.columns:
+
+        df = df.drop(columns=['Size'])
+
+    df = df.merge(
+        prod[
+            [
+                'Product No.',
+                'Brand Name',
+                'Category',
+                'Sub-Category',
+                'Size',
+                'Company Name',
+                'Sq.m/Box'
+            ]
+        ],
+        on='Product No.',
+        how='left'
+    )
+
+    # -----------------------------
+    # WAC CALCULATION
+    # -----------------------------
 
     purch = df[df['Type'].isin(['P','O.S'])].copy()
-    wac   = purch.groupby('Product No.').apply(lambda x: (x['Sq.m']*x['Rate']).sum()/x['Sq.m'].sum() if x['Sq.m'].sum()>0 else 0).reset_index()
+
+    wac = purch.groupby('Product No.').apply(
+        lambda x:
+        (x['Sq.m'] * x['Rate']).sum() / x['Sq.m'].sum()
+        if x['Sq.m'].sum() > 0 else 0
+    ).reset_index()
+
     wac.columns = ['Product No.','WAC Rate']
+
     df = df.merge(wac, on='Product No.', how='left')
+
     df['WAC Rate'] = df['WAC Rate'].fillna(0)
+
+    return df, prod
 
     def ap(row):
         adj = LOCAL_ADJ if 'LOCAL' in str(row.get('Category','')).upper() else IMPORTED_ADJ
