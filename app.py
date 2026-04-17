@@ -1123,7 +1123,8 @@ elif page == "📊 Period Comparison":
         t[f'{pa_l} Rev'] = t['Rev_A'].apply(fmt_m)
         t[f'{pb_l} Rev'] = t['Rev_B'].apply(fmt_m)
         t['Change'] = t['Rev Δ'].apply(lambda x:("+"+fmt_m(x)) if x>0 else fmt_m(x))
-        return t[['Dir',col,f'{pa_l} Rev',f'{pb_l} Rev','Change','Rev Δ%','Sqm_A','Sqm_B']].sort_values('Rev Δ',ascending=False)
+        t = t.sort_values('Rev_B', ascending=False)
+return t[['Dir',col,f'{pa_l} Rev',f'{pb_l} Rev','Change','Rev Δ%','Sqm_A','Sqm_B']]
     tab1,tab2,tab3,tab4,tab5 = st.tabs(["🏭 Brand","📂 Category","👤 Customer","📦 Product","📐 Size"])
     with tab1: st.dataframe(pc_table('Brand Name'),   hide_index=True, use_container_width=True)
     with tab2: st.dataframe(pc_table('Category'),     hide_index=True, use_container_width=True)
