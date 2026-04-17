@@ -1242,22 +1242,27 @@ elif page == "📦 Closing Stock":
     st.divider()
     tab1,tab2,tab3,tab4 = st.tabs(["📦 By Product","🏭 By Brand","📂 By Category","📐 By Size"])
     with tab1:
-        disp=['Product No.','Brand Name','Category','Size','Current Stock Sqm','WAC Rate','Stock Value PKR','Inventory Status','Stock Health','Days Since Last Sale']
+        disp=['Product No.','Brand Name','Category','Size','Current Stock Sqm','WAC Rate','Stock Value PKR']
         st.dataframe(flt2[disp], hide_index=True, use_container_width=True)
         st.download_button("📥 Download", flt2[disp].to_csv(index=False), "closing_stock.csv")
     with tab2:
         bs = flt2.groupby('Brand Name').agg(Products=('Product No.','count'),Sqm=('Current Stock Sqm','sum'),Val=('Stock Value PKR','sum'),WAC=('WAC Rate','mean')).reset_index().sort_values('Val',ascending=False)
         bs['Stock Value']=bs['Val'].apply(fmt_m); bs['% of Total']=(bs['Val']/flt2['Stock Value PKR'].sum()*100).round(1); bs['Avg WAC']=bs['WAC'].round(0)
-        st.dataframe(bs[['Brand Name','Products','Sqm','Stock Value','Avg WAC','% of Total']], hide_index=True, use_container_width=True)
+        tot_row = {'Brand Name':'📊 TOTAL','Products':bs['Products'].sum(),'Sqm':round(bs['Sqm'].sum(),1),'Stock Value':fmt_m(flt2['Stock Value PKR'].sum()),'Avg WAC':'','% of Total':100.0}
+        bs_disp = pd.concat([bs[['Brand Name','Products','Sqm','Stock Value','Avg WAC','% of Total']], pd.DataFrame([tot_row])], ignore_index=True)
+        st.dataframe(bs_disp, hide_index=True, use_container_width=True)
     with tab3:
         cs = flt2.groupby('Category').agg(Products=('Product No.','count'),Sqm=('Current Stock Sqm','sum'),Val=('Stock Value PKR','sum')).reset_index().sort_values('Val',ascending=False)
         cs['Stock Value']=cs['Val'].apply(fmt_m); cs['% of Total']=(cs['Val']/flt2['Stock Value PKR'].sum()*100).round(1)
-        st.dataframe(cs[['Category','Products','Sqm','Stock Value','% of Total']], hide_index=True, use_container_width=True)
+        tot_row = {'Category':'📊 TOTAL','Products':cs['Products'].sum(),'Sqm':round(cs['Sqm'].sum(),1),'Stock Value':fmt_m(flt2['Stock Value PKR'].sum()),'% of Total':100.0}
+        cs_disp = pd.concat([cs[['Category','Products','Sqm','Stock Value','% of Total']], pd.DataFrame([tot_row])], ignore_index=True)
+        st.dataframe(cs_disp, hide_index=True, use_container_width=True)
     with tab4:
         ss = flt2.groupby('Size').agg(Products=('Product No.','count'),Sqm=('Current Stock Sqm','sum'),Val=('Stock Value PKR','sum')).reset_index().sort_values('Val',ascending=False)
         ss['Stock Value']=ss['Val'].apply(fmt_m); ss['% of Total']=(ss['Val']/flt2['Stock Value PKR'].sum()*100).round(1)
-        st.dataframe(ss[['Size','Products','Sqm','Stock Value','% of Total']], hide_index=True, use_container_width=True)
-
+        tot_row = {'Size':'📊 TOTAL','Products':ss['Products'].sum(),'Sqm':round(ss['Sqm'].sum(),1),'Stock Value':fmt_m(flt2['Stock Value PKR'].sum()),'% of Total':100.0}
+        ss_disp = pd.concat([ss[['Size','Products','Sqm','Stock Value','% of Total']], pd.DataFrame([tot_row])], ignore_index=True)
+        st.dataframe(ss_disp, hide_index=True, use_container_width=True)
 
 elif page == "📋 Income Statement":
     if st.session_state['role'] not in ['admin','manager']: st.error("Access denied."); st.stop()
