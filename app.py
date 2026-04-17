@@ -12,15 +12,30 @@ SESSION_TIMEOUT = 20 * 60
 LOCAL_ADJ       = 0.047
 IMPORTED_ADJ    = 0.13
 
+EXPENSES_TEMPLATE = {
+    "Salaries & Wages":     {"FIDA": 125000, "SAQIB": 125000, "ASHAR": 45000,
+                             "JAVED": 45000, "ZEESHAN": 45000, "AFTAB": 45000,
+                             "HAMMAD": 45000, "KHURRAM": 45000, "Other Staff": 0},
+    "Rent":                 {"Showroom": 0, "Warehouse": 0},
+    "Utilities":            {"Electricity": 0, "Gas": 0, "Internet": 0},
+    "Transport & Delivery": {"Transport": 0},
+    "Marketing":            {"Digital Marketing": 0, "Print": 0},
+    "Other Expenses":       {"Miscellaneous": 0},
+}
+
+ASSETS_TEMPLATE = {
+    "Current Assets": {"Cash in Hand": 0, "Cash at Bank": 0, "Trade Receivables": 0,
+                       "Advance to Suppliers": 0, "Other Current Assets": 0},
+    "Fixed Assets":   {"Furniture & Fixtures": 0, "Vehicles": 0, "Equipment": 0, "Building/Leasehold": 0},
+    "Liabilities":    {"Trade Payables": 0, "Short Term Loans": 0, "Long Term Loans": 0, "Other Liabilities": 0}
+}
+
 # ─────────────────────────────────────────────
 # LOGIN
 # ─────────────────────────────────────────────
-
 USERS = {
     "hamza": {"password": st.secrets.get("PASS_HAMZA", ""), "role": "admin", "name": "Hamza"},
 }
-
-
 
 def login():
     st.markdown("<div style='text-align:center;padding:60px 0 20px'><h1>🏠 Mi-Tiles</h1><h3 style='color:gray'>Inventory Intelligence Dashboard</h3></div>", unsafe_allow_html=True)
@@ -29,12 +44,12 @@ def login():
         u = st.text_input("Username")
         p = st.text_input("Password", type="password")
         if st.button("Login", use_container_width=True):
-            
             if u in USERS and USERS[u]["password"] == p:
                 st.session_state.update({'logged_in':True,'user':u,'role':USERS[u]["role"],'name':USERS[u]["name"],'last_active':time.time()})
                 st.rerun()
             else:
                 st.error("Invalid username or password")
+
 def check_session():
     if 'last_active' in st.session_state:
         if time.time() - st.session_state['last_active'] > SESSION_TIMEOUT:
@@ -65,14 +80,10 @@ def load_data(path):
         auth_req = google.auth.transport.requests.Request()
         creds.refresh(auth_req)
 
-        file_id = st.secrets.get("GOOGLE_FILE_ID", "1tyUCZojpgSXJ333Gd1McNDTogtWSFxhl")
+        file_id = st.secrets.get("GOOGLE_FILE_ID", "1ikdIp0wAtDD8B2PCDTc0X_cyxyXwaolLw_HTZtnT6No")
         download_url = f"https://docs.google.com/spreadsheets/d/{file_id}/export?format=xlsx"
 
-        response = requests.get(
-            download_url,
-            headers={"Authorization": f"Bearer {creds.token}"},
-            timeout=60
-        )
+        response = requests.get(download_url, headers={"Authorization": f"Bearer {creds.token}"}, timeout=60)
         response.raise_for_status()
         buffer = io.BytesIO(response.content)
 
@@ -84,7 +95,6 @@ def load_data(path):
     buffer.seek(0)
     prod = pd.read_excel(buffer, sheet_name='PRODUCT DATA')
 
-    # Force date parsing
     df['Date'] = pd.to_datetime(df['Date'].astype(str).str.strip(), format='%d-%m-%Y   %I:%M %p', errors='coerce')
     df['Sale Day'] = df['Date'].dt.date
     df['Month']    = df['Date'].dt.to_period('M').astype(str)
@@ -94,8 +104,7 @@ def load_data(path):
 
     for col in ['Sq.m','Rate','Closing','Profit','SALE','RETURN','GROSS PROFIT','NET SALE']:
         df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0)
-    
-    # Recalculate SALE and RETURN from raw columns if they're zero
+
     sale_mask = (df['SALE'] == 0) & (df['Type'] == 'S')
     df.loc[sale_mask, 'SALE'] = df.loc[sale_mask, 'Sq.m'] * df.loc[sale_mask, 'Rate']
     ret_mask = (df['RETURN'] == 0) & (df['Type'] == 'S.R')
@@ -105,32 +114,6 @@ def load_data(path):
     prod['Product No.']= prod['Product No.'].astype(str).str.replace('\xa0',' ').str.strip()
 
     if 'Size' in df.columns: df = df.drop(columns=['Size'])
-    df = df.merge(prod[['Product No.','Brand Name','Category','Sub-Category','Size','Company Name','Sq.m/Box']], on='Product No.', how='left')
-
-    purch = df[df['Type'].isin(['P','O.S'])].copy()
-    wac   = purch.groupby('Product No.').apply(lambda x: (x['Sq.m']*x['Rate']).sum()/x['Sq.m'].sum() if x['Sq.m'].sum()>0 else 0).reset_index()
-    wac.columns = ['Product No.','WAC Rate']
-    df = df.merge(wac, on='Product No.', how='left')
-    df['WAC Rate'] = df['WAC Rate'].fillna(0)
-
-    def ap(row):
-        adj = LOCAL_ADJ if 'LOCAL' in str(row.get('Category','')).upper() else IMPORTED_ADJ
-        return row['SALE'] - row['Sq.m'] * row['WAC Rate'] * (1 - adj)
-    df['Actual Profit'] = df.apply(ap, axis=1)
-
-    return df, prod
-    df['Date']       = pd.to_datetime(df['Date'].str.strip(), format='%d-%m-%Y   %I:%M %p', errors='coerce')
-    df['Sale Day']   = df['Date'].dt.date
-    df['Month']      = df['Date'].dt.to_period('M').astype(str)
-    df['Year']       = df['Date'].dt.year
-    df['Bill No.']   = df['Bill No.'].astype(str)
-    df['Account Name'] = df['Account Name'].astype(str).str.replace('\xa0',' ').str.strip()
-    for col in ['Sq.m','Rate','Closing','Profit','SALE','RETURN','GROSS PROFIT','NET SALE']:
-        df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0)
-    df['Product No.']  = df['Product No.'].astype(str).str.replace('\xa0',' ').str.strip()
-    prod['Product No.']= prod['Product No.'].astype(str).str.replace('\xa0',' ').str.strip()
-    if 'Size' in df.columns: df = df.drop(columns=['Size'])
-
     df = df.merge(prod[['Product No.','Brand Name','Category','Sub-Category','Size','Company Name','Sq.m/Box']], on='Product No.', how='left')
 
     purch = df[df['Type'].isin(['P','O.S'])].copy()
@@ -179,6 +162,14 @@ def build_pi(_df, _prod):
         rev  = sal['SALE'].sum(); erpp=sal['Profit'].sum(); actp=sal['Actual Profit'].sum()
         em   = (erpp/rev*100) if rev>0 else 0; am=(actp/rev*100) if rev>0 else 0
 
+        # Composite Reorder Score
+        unique_customers = sal['Account Name'].nunique() if len(sal)>0 else 0
+        vel_norm  = min(vel/500*100,  100) if vel>0  else 0
+        cust_norm = min(unique_customers/50*100, 100) if unique_customers>0 else 0
+        freq_norm = min(freq/0.3*100, 100) if freq>0 else 0
+        st_norm   = min((ns/max(psq,1))*100, 100)
+        reorder_score = round(vel_norm*0.40 + cust_norm*0.25 + freq_norm*0.20 + st_norm*0.15, 1)
+
         if ns<=0:              dp='No Sales / Returns Only'
         elif freq>=0.15 and cv<3: dp='Stable Fast Mover'
         elif freq>=0.15:       dp='Volatile Fast Mover'
@@ -200,7 +191,6 @@ def build_pi(_df, _prod):
         elif mos<=6:           sh='Overstocked'
         else:                  sh='Dead Stock'
 
-        # ABC XYZ
         total_months = _df['Date'].dt.to_period('M').nunique()
         cons = sdays/total_months*100 if total_months>0 else 0
         xyz  = 'X' if cons>=50 else ('Y' if cons>=20 else 'Z')
@@ -215,11 +205,10 @@ def build_pi(_df, _prod):
             'Total Revenue':round(rev,2),'ERP Profit':round(erpp,2),'Actual Profit':round(actp,2),
             'ERP Margin %':round(em,2),'Actual Margin %':round(am,2),
             'Demand Pattern':dp,'Inventory Status':inv,'Stock Health':sh,'XYZ':xyz,
-            'Consistency %':round(cons,1)})
+            'Consistency %':round(cons,1),'Reorder Score':reorder_score})
 
     pi = pd.DataFrame(results)
     pi = pi.merge(_prod[['Product No.','Brand Name','Category','Sub-Category','Size','Company Name','Sq.m/Box']], on='Product No.', how='left')
-
     pi = pi.sort_values('Total Revenue', ascending=False)
     pi['Cum %'] = pi['Total Revenue'].cumsum()/pi['Total Revenue'].sum()*100
     pi['ABC']   = pi['Cum %'].apply(lambda x: 'A' if x<=70 else ('B' if x<=90 else 'C'))
@@ -239,14 +228,11 @@ def build_pi(_df, _prod):
 @st.cache_data(ttl=3600)
 def build_pairs(_df, _prod):
     sales = _df[_df['Type']=='S'].copy()
-
-    # Product pairs with size
     bill_prods = sales.groupby('Bill No.').apply(
         lambda x: list({p:(p,s) for p,s in zip(x['Product No.'],x['Size'].fillna('?'))}.values())
     ).reset_index()
     bill_prods.columns = ['Bill No.','Products']
     bill_prods = bill_prods[bill_prods['Products'].apply(len)>=2]
-
     pair_counts = {}
     for _, row in bill_prods.iterrows():
         items = row['Products'][:8]
@@ -256,12 +242,9 @@ def build_pairs(_df, _prod):
                 if p1>p2: p1,s1,p2,s2 = p2,s2,p1,s1
                 key=(p1,s1,p2,s2)
                 pair_counts[key] = pair_counts.get(key,0)+1
-
     pairs = pd.DataFrame([(k[0],k[1],k[2],k[3],v) for k,v in pair_counts.items()],
                           columns=['Product A','Size A','Product B','Size B','Co-occurrence'])
-    pairs = pairs.sort_values('Co-occurrence', ascending=False).head(200)
-
-    # Size pairs
+    pairs = pairs.sort_values('Co-occurrence', ascending=False).head(2000)
     bill_sizes = sales.groupby('Bill No.')['Size'].apply(lambda x: list(set(x.dropna()))).reset_index()
     bill_sizes = bill_sizes[bill_sizes['Size'].apply(len)>=2]
     sp = {}
@@ -270,7 +253,6 @@ def build_pairs(_df, _prod):
             key=(s1,s2); sp[key]=sp.get(key,0)+1
     size_pairs = pd.DataFrame([(k[0],k[1],v) for k,v in sp.items()],
                                columns=['Size A','Size B','Co-occurrence']).sort_values('Co-occurrence',ascending=False)
-
     return pairs, size_pairs
 
 
@@ -300,6 +282,8 @@ with st.sidebar:
         "💰 Margin Analysis","🧑‍💼 Salesman Performance","🎯 Incentive Calculator",
         "🏹 Dead Stock Targets","🛒 Product Pairs","📊 ABC-XYZ Analysis",
         "📉 Sell Through","🔮 Demand Forecast","⚠️ Reorder Alerts",
+        "📦 Stock Comparison","🔍 Search","📊 Period Comparison",
+        "📦 Closing Stock","📋 Income Statement","🏦 Assets Position",
     ], label_visibility="collapsed")
     st.divider()
     if st.button("🔄 Refresh Data"): st.cache_data.clear(); st.rerun()
@@ -312,14 +296,7 @@ def fmt_m(v): return f"Rs {v/1e6:.2f}M"
 def fmt_k(v): return f"Rs {v/1e3:.1f}K"
 
 def global_filters(df, key_prefix, show_date=True, show_salesman=True, show_warehouse=True, show_inventory=False):
-    """Returns filtered df based on selected filters"""
     dff = df.copy()
-    cols_row1 = []
-    if show_date: cols_row1.append("date")
-    cols_row2 = ["brand","company","category","size"]
-    if show_warehouse: cols_row2.append("warehouse")
-    if show_salesman:  cols_row2.append("salesman")
-
     if show_date:
         c1, c2 = st.columns([2,1])
         with c1:
@@ -332,7 +309,6 @@ def global_filters(df, key_prefix, show_date=True, show_salesman=True, show_ware
             if show_warehouse:
                 wh = st.selectbox("Warehouse", ['All']+sorted(df['Warehouse'].dropna().unique().tolist()), key=f"{key_prefix}_wh")
                 if wh!='All': dff=dff[dff['Warehouse']==wh]
-
     c1,c2,c3,c4 = st.columns(4)
     with c1:
         br = st.selectbox("Brand", ['All']+sorted(df['Brand Name'].dropna().unique().tolist()), key=f"{key_prefix}_br")
@@ -346,7 +322,6 @@ def global_filters(df, key_prefix, show_date=True, show_salesman=True, show_ware
     with c4:
         sz = st.selectbox("Size", ['All']+sorted(prod['Size'].dropna().unique().tolist()), key=f"{key_prefix}_sz")
         if sz!='All': dff=dff[dff['Size']==sz]
-
     if show_salesman and not show_date:
         sal = st.selectbox("Salesman", ['All']+sorted(df['Salesman'].dropna().unique().tolist()), key=f"{key_prefix}_sal")
         if sal!='All': dff=dff[dff['Salesman']==sal]
@@ -355,11 +330,9 @@ def global_filters(df, key_prefix, show_date=True, show_salesman=True, show_ware
         with c1:
             sal = st.selectbox("Salesman", ['All']+sorted(df['Salesman'].dropna().unique().tolist()), key=f"{key_prefix}_sal")
             if sal!='All': dff=dff[dff['Salesman']==sal]
-
     return dff
 
 def pi_filters(pi_df, key_prefix):
-    """Filters for inventory pages — no date/salesman/warehouse"""
     flt = pi_df.copy()
     c1,c2,c3,c4,c5 = st.columns(5)
     with c1:
@@ -388,7 +361,6 @@ if page == "📊 Overview":
     with st.expander("🔍 Filters", expanded=False):
         dff = global_filters(df, "ov")
     sales_df = dff[dff['Type']=='S'].copy()
-
     c1,c2,c3,c4,c5 = st.columns(5)
     c1.metric("Total Stock Value",   fmt_m(pi['Stock Value PKR'].sum()))
     c2.metric("Total Stock Sqm",     f"{pi[pi['Current Stock Sqm']>0]['Current Stock Sqm'].sum():,.0f}")
@@ -489,7 +461,7 @@ elif page == "📈 Sales Trends":
         cr['ERP Profit']= cr['ERP_P'].apply(fmt_m)
         d=['Category','Sale Value','Sale_Sqm','ERP Profit','ERP M%']
         if is_admin:
-            cr['Act M%']=( cr['Act_P']/cr['Sale_Val']*100).round(1); cr['Act Profit']=cr['Act_P'].apply(fmt_m); d+=['Act Profit','Act M%']
+            cr['Act M%']=(cr['Act_P']/cr['Sale_Val']*100).round(1); cr['Act Profit']=cr['Act_P'].apply(fmt_m); d+=['Act Profit','Act M%']
         st.dataframe(cr[d], hide_index=True, use_container_width=True)
     with cb:
         st.subheader("By Brand")
@@ -506,7 +478,6 @@ elif page == "📈 Sales Trends":
     wh2 = sales_df.groupby('Warehouse').agg(Sale_Val=('SALE','sum'),Sale_Sqm=('Sq.m','sum'),Bills=('Bill No.','nunique')).reset_index().sort_values('Sale_Val',ascending=False)
     wh2['Sale Value']=wh2['Sale_Val'].apply(fmt_m)
     st.dataframe(wh2[['Warehouse','Sale Value','Sale_Sqm','Bills']], hide_index=True, use_container_width=True)
-
 
 # ─────────────────────────────────────────────
 # PAGE 3 — DEAD STOCK
@@ -531,9 +502,6 @@ elif page == "🔴 Dead Stock":
     st.download_button("📥 Download", dead[cols].to_csv(index=False), "dead_stock.csv", "text/csv")
 
 
-# ─────────────────────────────────────────────
-# PAGE 4 — FAST MOVERS
-# ─────────────────────────────────────────────
 elif page == "✅ Fast Movers":
     st.title("✅ Fast Movers")
     with st.expander("🔍 Filters", expanded=True):
@@ -550,12 +518,9 @@ elif page == "✅ Fast Movers":
         st.dataframe(reorder[['Product No.','Brand Name','Category','Size','Current Stock Sqm','Sales Velocity/Month','Months of Stock','Demand Pattern']], hide_index=True, use_container_width=True)
         st.divider()
     st.subheader("All Fast Movers")
-    st.dataframe(fast[['Product No.','Brand Name','Category','Size','Current Stock Sqm','Stock Value PKR','Sales Velocity/Month','Months of Stock','Demand Pattern','Stock Health']], hide_index=True, use_container_width=True)
+    st.dataframe(fast[['Product No.','Brand Name','Category','Size','Current Stock Sqm','Stock Value PKR','Sales Velocity/Month','Months of Stock','Demand Pattern','Stock Health','Reorder Score']], hide_index=True, use_container_width=True)
 
 
-# ─────────────────────────────────────────────
-# PAGE 5 — PRODUCT INTELLIGENCE
-# ─────────────────────────────────────────────
 elif page == "📦 Product Intelligence":
     st.title("📦 Product Intelligence")
     with st.expander("🔍 Filters", expanded=True):
@@ -573,9 +538,6 @@ elif page == "📦 Product Intelligence":
     st.download_button("📥 Download", flt.to_csv(index=False), "product_intelligence.csv", "text/csv")
 
 
-# ─────────────────────────────────────────────
-# PAGE 6 — BRAND & COMPANY
-# ─────────────────────────────────────────────
 elif page == "🏭 Brand & Company":
     st.title("🏭 Brand & Company Analysis")
     with st.expander("🔍 Filters", expanded=False):
@@ -602,16 +564,12 @@ elif page == "🏭 Brand & Company":
         st.dataframe(cs2[d], hide_index=True, use_container_width=True)
 
 
-# ─────────────────────────────────────────────
-# PAGE 7 — CUSTOMER INTELLIGENCE
-# ─────────────────────────────────────────────
 elif page == "👤 Customer Intelligence":
     st.title("👤 Customer Intelligence")
     with st.expander("🔍 Filters", expanded=True):
         dff = global_filters(df, "ci", show_salesman=True)
     sales_all = df[df['Type']=='S'].copy()
     sales_df  = dff[dff['Type']=='S'].copy()
-
     c1,c2,c3,c4 = st.columns(4)
     c1.metric("Total Customers",      f"{sales_df['Account Name'].nunique():,}")
     c2.metric("Total Revenue",        fmt_m(sales_df['SALE'].sum()))
@@ -619,9 +577,7 @@ elif page == "👤 Customer Intelligence":
     c3.metric("Avg Revenue/Customer", f"Rs {avg_rev:,.0f}")
     c4.metric("Total Bills",          f"{sales_df['Bill No.'].nunique():,}")
     st.divider()
-
     tab1,tab2,tab3,tab4 = st.tabs(["🆕 New Customers","🔄 Returning","⭐ Top Customers","📊 Full List"])
-
     with tab1:
         st.subheader("New Customers in Date Range")
         first_tx = sales_all.groupby('Account Name')['Date'].min().reset_index()
@@ -637,7 +593,6 @@ elif page == "👤 Customer Intelligence":
         c1.metric("New Customers",f"{len(new):,}"); c2.metric("Avg Bills",f"{new['Bills'].mean():.1f}" if len(new)>0 else "0"); c3.metric("Unique Products",f"{new['Products'].sum():,.0f}")
         st.dataframe(new[['Account Name','First Transaction Date','Revenue','Bills','Products']], hide_index=True, use_container_width=True)
         st.download_button("📥 Download", new.to_csv(index=False), "new_customers.csv", "text/csv")
-
     with tab2:
         st.subheader("Customer Return Frequency")
         cf = sales_all.groupby('Account Name').agg(Bills=('Bill No.','nunique'),Revenue=('SALE','sum'),First=('Date','min'),Last=('Date','max')).reset_index()
@@ -656,7 +611,6 @@ elif page == "👤 Customer Intelligence":
         if cr2!='All': f2=f2[f2['Churn Risk']==cr2]
         st.dataframe(f2[['Account Name','Revenue','Bills','Avg Gap (days)','Last Visit','Days Since','Visit Freq','Churn Risk']].sort_values('Days Since'), hide_index=True, use_container_width=True)
         st.download_button("📥 Download", f2.to_csv(index=False), "returning.csv", "text/csv")
-
     with tab3:
         st.subheader("Top Customers — ABC Analysis")
         top = sales_df.groupby('Account Name').agg(Rev=('SALE','sum'),ERP_P=('Profit','sum'),Act_P=('Actual Profit','sum'),Sqm=('Sq.m','sum'),Bills=('Bill No.','nunique'),Prods=('Product No.','nunique'),Last=('Date','max')).reset_index().sort_values('Rev',ascending=False)
@@ -676,7 +630,6 @@ elif page == "👤 Customer Intelligence":
         if is_admin: top['Act M%']=(top['Act_P']/top['Rev']*100).round(1); top['Act Profit']=top['Act_P'].apply(fmt_m); d+=['Act Profit','Act M%']
         st.dataframe(top[d], hide_index=True, use_container_width=True)
         st.download_button("📥 Download", top.to_csv(index=False), "top_customers.csv", "text/csv")
-
     with tab4:
         st.subheader("Full Customer List")
         full = sales_all.groupby('Account Name').agg(Rev=('SALE','sum'),ERP_P=('Profit','sum'),Sqm=('Sq.m','sum'),Bills=('Bill No.','nunique'),Prods=('Product No.','nunique'),First=('Date','min'),Last=('Date','max')).reset_index().sort_values('Rev',ascending=False)
@@ -694,9 +647,6 @@ elif page == "👤 Customer Intelligence":
         st.download_button("📥 Download", full.to_csv(index=False), "all_customers.csv", "text/csv")
 
 
-# ─────────────────────────────────────────────
-# PAGE 8 — MARGIN ANALYSIS
-# ─────────────────────────────────────────────
 elif page == "💰 Margin Analysis":
     if st.session_state['role'] not in ['admin','manager']: st.error("Access denied."); st.stop()
     st.title("💰 Margin Analysis")
@@ -730,9 +680,6 @@ elif page == "💰 Margin Analysis":
         st.dataframe(t[d].head(200), hide_index=True, use_container_width=True)
 
 
-# ─────────────────────────────────────────────
-# PAGE 9 — SALESMAN PERFORMANCE
-# ─────────────────────────────────────────────
 elif page == "🧑‍💼 Salesman Performance":
     if st.session_state['role'] not in ['admin','manager']: st.error("Access denied."); st.stop()
     st.title("🧑‍💼 Salesman Performance")
@@ -740,7 +687,6 @@ elif page == "🧑‍💼 Salesman Performance":
         dff = global_filters(df, "sp")
     sales_df = dff[dff['Type']=='S'].copy()
     returns_df = dff[dff['Type']=='S.R'].copy()
-
     sal = sales_df.groupby('Salesman').agg(Revenue=('SALE','sum'),ERP_P=('Profit','sum'),Act_P=('Actual Profit','sum'),Sqm=('Sq.m','sum'),Bills=('Bill No.','nunique'),Customers=('Account Name','nunique'),Products_Sold=('Product No.','nunique')).reset_index()
     ret_sal = returns_df.groupby('Salesman').agg(Ret_Val=('RETURN','sum'),Ret_Sqm=('Sq.m','sum')).reset_index()
     sal = sal.merge(ret_sal, on='Salesman', how='left').fillna(0)
@@ -752,7 +698,6 @@ elif page == "🧑‍💼 Salesman Performance":
     sal['Net Rev (Rs)'] = sal['Net Revenue'].apply(fmt_m)
     sal['ERP Profit']   = sal['ERP_P'].apply(fmt_m)
     sal = sal.sort_values('Revenue', ascending=False)
-
     c1,c2,c3=st.columns(3)
     c1.metric("Total Salesmen",f"{len(sal):,}"); c2.metric("Top Performer",sal.iloc[0]['Salesman'] if len(sal)>0 else "N/A"); c3.metric("Top Revenue",sal.iloc[0]['Revenue (Rs)'] if len(sal)>0 else "N/A")
     st.divider()
@@ -765,14 +710,9 @@ elif page == "🧑‍💼 Salesman Performance":
     sm['Revenue']=sm['Revenue'].apply(fmt_k)
     st.dataframe(sm, hide_index=True, use_container_width=True)
 
-
-# ─────────────────────────────────────────────
-# PAGE 10 — INCENTIVE CALCULATOR
-# ─────────────────────────────────────────────
 elif page == "🎯 Incentive Calculator":
     if not is_admin: st.error("Admin only."); st.stop()
     st.title("🎯 Salesman Incentive Calculator")
-
     SALESMAN_CONFIG = {
         'FIDA':    {'salary':125000,'exp':20,'tier':'Senior',  'base_target':20000000,'commission':0.005,'bonus_target':30000000,'bonus':50000,'return_threshold':5.0,'return_penalty':0.001},
         'SAQIB':   {'salary':125000,'exp':20,'tier':'Senior',  'base_target':20000000,'commission':0.005,'bonus_target':30000000,'bonus':50000,'return_threshold':5.0,'return_penalty':0.001},
@@ -783,27 +723,22 @@ elif page == "🎯 Incentive Calculator":
         'HAMMAD':  {'salary':45000, 'exp':7, 'tier':'Junior',  'base_target':5000000, 'commission':0.01,  'bonus_target':10000000,'bonus':20000,'return_threshold':6.0,'return_penalty':0.002},
         'KHURRAM': {'salary':45000, 'exp':7, 'tier':'Junior',  'base_target':5000000, 'commission':0.01,  'bonus_target':10000000,'bonus':20000,'return_threshold':6.0,'return_penalty':0.002},
     }
-
     st.info("📌 You can adjust all metrics below. Changes are live and don't affect saved config.")
-
     with st.expander("🔍 Date Filter", expanded=False):
         dff = global_filters(df, "ic", show_salesman=False, show_inventory=False)
     sales_df   = dff[dff['Type']=='S'].copy()
     returns_df = dff[dff['Type']=='S.R'].copy()
-
-    sal_perf = sales_df.groupby('Salesman').agg(Revenue=('SALE','sum'),Net_Rev=('NET SALE','sum')).reset_index()
+    sal_perf = sales_df.groupby('Salesman').agg(Revenue=('SALE','sum')).reset_index()
     ret_perf = returns_df.groupby('Salesman').agg(Ret_Val=('RETURN','sum')).reset_index()
     sal_perf = sal_perf.merge(ret_perf, on='Salesman', how='left').fillna(0)
     sal_perf['Net Revenue']  = sal_perf['Revenue'] - sal_perf['Ret_Val']
     sal_perf['Return Rate %']= (sal_perf['Ret_Val']/sal_perf['Revenue']*100).round(1)
-
     st.divider()
     results = []
     for sal_name, cfg in SALESMAN_CONFIG.items():
         row = sal_perf[sal_perf['Salesman']==sal_name]
         if len(row)==0: continue
         r = row.iloc[0]
-
         with st.expander(f"⚙️ {sal_name} — {cfg['tier']} | Salary: Rs {cfg['salary']:,}", expanded=False):
             c1,c2,c3 = st.columns(3)
             with c1:
@@ -816,7 +751,6 @@ elif page == "🎯 Incentive Calculator":
                 ret_threshold= st.number_input(f"Return Rate Threshold %", value=cfg['return_threshold'], step=0.5, key=f"{sal_name}_rt")
                 ret_penalty  = st.number_input(f"Return Penalty % per 1% excess", value=cfg['return_penalty']*100, step=0.05, format="%.3f", key=f"{sal_name}_rp") / 100
             dead_bonus = st.number_input(f"Dead Stock Commission %", value=1.5, step=0.1, format="%.1f", key=f"{sal_name}_db") / 100
-
         net_rev      = r['Net Revenue']
         return_rate  = r['Return Rate %']
         commission_earned = max(0, net_rev - base_target) * commission
@@ -825,24 +759,12 @@ elif page == "🎯 Incentive Calculator":
         return_deduction  = net_rev * ret_penalty * excess_return
         total_incentive   = commission_earned + bonus_earned - return_deduction
         total_payout      = cfg['salary'] + max(0, total_incentive)
-
-        results.append({
-            'Salesman'          : sal_name,
-            'Tier'              : cfg['tier'],
-            'Base Salary'       : cfg['salary'],
-            'Net Revenue'       : round(net_rev),
-            'Base Target'       : base_target,
-            'Target Hit'        : '✅' if net_rev>=base_target else '❌',
-            'Commission'        : round(commission_earned),
-            'Bonus Target Hit'  : '✅' if net_rev>=bonus_target else '❌',
-            'Bonus'             : round(bonus_earned),
-            'Return Rate %'     : return_rate,
-            'Return Deduction'  : round(return_deduction),
-            'Total Incentive'   : round(max(0,total_incentive)),
-            'Total Payout'      : round(total_payout),
-            'Cost to Revenue %' : round(total_payout/net_rev*100,2) if net_rev>0 else 0,
-        })
-
+        results.append({'Salesman':sal_name,'Tier':cfg['tier'],'Base Salary':cfg['salary'],
+            'Net Revenue':round(net_rev),'Base Target':base_target,'Target Hit':'✅' if net_rev>=base_target else '❌',
+            'Commission':round(commission_earned),'Bonus Target Hit':'✅' if net_rev>=bonus_target else '❌',
+            'Bonus':round(bonus_earned),'Return Rate %':return_rate,'Return Deduction':round(return_deduction),
+            'Total Incentive':round(max(0,total_incentive)),'Total Payout':round(total_payout),
+            'Cost to Revenue %':round(total_payout/net_rev*100,2) if net_rev>0 else 0})
     if results:
         res_df = pd.DataFrame(results)
         res_df['Net Revenue']      = res_df['Net Revenue'].apply(fmt_m)
@@ -857,145 +779,73 @@ elif page == "🎯 Incentive Calculator":
         st.download_button("📥 Download", res_df.to_csv(index=False), "incentives.csv", "text/csv")
 
 
-# ─────────────────────────────────────────────
-# PAGE 11 — DEAD STOCK TARGETS
-# ─────────────────────────────────────────────
 elif page == "🏹 Dead Stock Targets":
     if not is_admin: st.error("Admin only."); st.stop()
     st.title("🏹 Dead Stock Salesman Targets")
-    st.caption("Assign dead stock products to salesmen for clearance. Extra 1.5% commission on dead stock sold.")
-
     with st.expander("🔍 Filters", expanded=True):
         flt = pi_filters(pi, "dst")
-
     dead = flt[(flt['Inventory Status']=='Dead Stock')&(flt['Current Stock Sqm']>0)].copy()
     dead['Suggested Discount %'] = dead['Days Since Last Sale'].apply(lambda x: 10 if x<=450 else (20 if x<=540 else (30 if x<=630 else 40)))
     dead['Liquidation Price']    = (dead['WAC Rate']*(1-dead['Suggested Discount %']/100)).round(0)
     dead['Potential Revenue']    = (dead['Current Stock Sqm']*dead['Liquidation Price']).round(0)
-
     st.subheader("Dead Stock Overview by Brand")
     brand_dead = dead.groupby('Brand Name').agg(Products=('Product No.','count'),Stock_Value=('Stock Value PKR','sum'),Potential_Rev=('Potential Revenue','sum')).reset_index().sort_values('Stock_Value',ascending=False)
     brand_dead['Stock Value']    = brand_dead['Stock_Value'].apply(fmt_m)
     brand_dead['Potential Rev']  = brand_dead['Potential_Rev'].apply(fmt_m)
-
     ASSIGNMENTS = {
-        'OREAL CERAMICS'          : ['FIDA','SAQIB'],
-        'MONTAGE CERAMICS (TIME)' : ['ASHAR','KHURRAM'],
-        'MAGNET'                  : ['ZEESHAN','AFTAB'],
-        'GHANI'                   : ['JAVED','HAMMAD'],
-        'CHINA'                   : ['FIDA','SAQIB','ASHAR','JAVED','ZEESHAN','AFTAB','HAMMAD','KHURRAM'],
-        'ORIENT'                  : ['ZEESHAN','AFTAB'],
-        'GREAT WALL'              : ['JAVED','HAMMAD'],
-        'KEMPINS'                 : ['ASHAR','KHURRAM'],
+        'OREAL CERAMICS':['FIDA','SAQIB'],'MONTAGE CERAMICS (TIME)':['ASHAR','KHURRAM'],
+        'MAGNET':['ZEESHAN','AFTAB'],'GHANI':['JAVED','HAMMAD'],
+        'CHINA':['FIDA','SAQIB','ASHAR','JAVED','ZEESHAN','AFTAB','HAMMAD','KHURRAM'],
+        'ORIENT':['ZEESHAN','AFTAB'],'GREAT WALL':['JAVED','HAMMAD'],'KEMPINS':['ASHAR','KHURRAM'],
     }
     brand_dead['Assigned To'] = brand_dead['Brand Name'].map(lambda x: ', '.join(ASSIGNMENTS.get(x,['All'])))
     st.dataframe(brand_dead[['Brand Name','Products','Stock Value','Potential Rev','Assigned To']], hide_index=True, use_container_width=True)
-
     st.divider()
-    st.subheader("Filter Dead Stock by Brand Assignment")
     sal_sel = st.selectbox("Show dead stock assigned to:", ['All']+['FIDA','SAQIB','ASHAR','JAVED','ZEESHAN','AFTAB','HAMMAD','KHURRAM'])
-
     dead_display = dead.copy()
     if sal_sel != 'All':
         assigned_brands = [b for b,sals in ASSIGNMENTS.items() if sal_sel in sals or sals==['All']]
         dead_display = dead_display[dead_display['Brand Name'].isin(assigned_brands)]
-
-    st.caption(f"Showing {len(dead_display):,} products — {fmt_m(dead_display['Stock Value PKR'].sum())} stock value — {fmt_m(dead_display['Potential Revenue'].sum())} potential revenue at liquidation price")
-
+    st.caption(f"Showing {len(dead_display):,} products — {fmt_m(dead_display['Stock Value PKR'].sum())} stock value")
     cols = ['Product No.','Brand Name','Category','Size','Current Stock Sqm','WAC Rate','Stock Value PKR','Days Since Last Sale','Suggested Discount %','Liquidation Price','Potential Revenue']
     st.dataframe(dead_display[cols], hide_index=True, use_container_width=True)
-
-    st.divider()
-    st.subheader("💡 Dead Stock Incentive Plan")
-    st.markdown("""
-    | Component | Detail |
-    |-----------|--------|
-    | Extra Commission | **1.5%** on every dead stock unit sold (on top of regular commission) |
-    | Monthly Leaderboard | Track dead stock clearance value per salesman |
-    | Quarterly Bonus | **Rs 25,000** for salesman who clears highest dead stock value |
-    | Target | Clear minimum **Rs 2M** dead stock per salesman per quarter |
-    | Penalty | Salesman assigned dead stock that sits uncleared for 90 days gets base target increased by 10% |
-    """)
-    st.download_button("📥 Download Dead Stock List", dead_display[cols].to_csv(index=False), "dead_stock_targets.csv", "text/csv")
+    st.download_button("📥 Download", dead_display[cols].to_csv(index=False), "dead_stock_targets.csv", "text/csv")
 
 
-# ─────────────────────────────────────────────
-# PAGE 12 — PRODUCT PAIRS
-# ─────────────────────────────────────────────
 elif page == "🛒 Product Pairs":
     st.title("🛒 Frequently Bought Together")
-    st.caption("Products and sizes commonly purchased in the same bill — use for bundling, display, and upsell strategy")
-
     tab1, tab2 = st.tabs(["📦 Product SKU Pairs","📐 Size Pairs"])
-
     with tab1:
         st.subheader("Product SKU Pairs")
-        st.caption("Products bought together in the same bill — includes size context")
-
         c1,c2,c3 = st.columns(3)
-        with c1:
-            min_co = st.number_input("Min Co-occurrence", value=10, step=5, key="pp_min")
-        with c2:
-            sz_filter = st.selectbox("Filter by Size", ['All']+sorted(prod['Size'].dropna().unique().tolist()), key="pp_sz")
-        with c3:
-            br_filter = st.selectbox("Filter by Brand (Product A)", ['All']+sorted(prod['Brand Name'].dropna().unique().tolist()), key="pp_br")
-
+        with c1: min_co = st.number_input("Min Co-occurrence", value=10, step=5, key="pp_min")
+        with c2: sz_filter = st.selectbox("Filter by Size", ['All']+sorted(prod['Size'].dropna().unique().tolist()), key="pp_sz")
+        with c3: br_filter = st.selectbox("Filter by Brand", ['All']+sorted(prod['Brand Name'].dropna().unique().tolist()), key="pp_br")
         pairs_show = pairs_df[pairs_df['Co-occurrence']>=min_co].copy()
         if sz_filter!='All': pairs_show = pairs_show[(pairs_show['Size A']==sz_filter)|(pairs_show['Size B']==sz_filter)]
         if br_filter!='All':
             br_prods = prod[prod['Brand Name']==br_filter]['Product No.'].tolist()
             pairs_show = pairs_show[(pairs_show['Product A'].isin(br_prods))|(pairs_show['Product B'].isin(br_prods))]
-
-        # Add brand info
         br_map = prod.set_index('Product No.')['Brand Name'].to_dict()
         pairs_show['Brand A'] = pairs_show['Product A'].map(br_map)
         pairs_show['Brand B'] = pairs_show['Product B'].map(br_map)
-
         st.caption(f"Showing {len(pairs_show):,} pairs")
-        st.dataframe(
-            pairs_show[['Product A','Size A','Brand A','Product B','Size B','Brand B','Co-occurrence']],
-            hide_index=True, use_container_width=True
-        )
+        st.dataframe(pairs_show[['Product A','Size A','Brand A','Product B','Size B','Brand B','Co-occurrence']], hide_index=True, use_container_width=True)
         st.download_button("📥 Download", pairs_show.to_csv(index=False), "product_pairs.csv", "text/csv")
-
-        st.divider()
-        st.subheader("💡 Business Actions from Pairs")
-        st.markdown("""
-        | Insight | Action |
-        |---------|--------|
-        | Same-series tiles (A/B/C variants) always bought together | **Bundle as a set** — offer 3% discount on complete set purchase |
-        | 40x100 tiles consistently paired | **Display them together** in showroom |
-        | 30x60 + 30x90 cross-size pairing | **Suggest complementary sizes** at point of sale |
-        | High co-occurrence pairs with dead stock | **Use fast mover to pull dead stock** — bundle slow+fast at discount |
-        """)
-
     with tab2:
         st.subheader("Size Pairs")
-        st.caption("Sizes most frequently purchased together — helps with showroom layout and recommendations")
-
         min_co2 = st.number_input("Min Co-occurrence", value=50, step=25, key="sp_min")
         sp_show = size_pairs_df[size_pairs_df['Co-occurrence']>=min_co2].copy()
-
-        st.caption(f"Showing {len(sp_show):,} size pairs")
         st.dataframe(sp_show, hide_index=True, use_container_width=True)
-
-        st.divider()
         st.subheader("💡 Top Size Combinations")
-        top_sizes = size_pairs_df.head(10)
-        for _, row in top_sizes.iterrows():
+        for _, row in size_pairs_df.head(10).iterrows():
             st.write(f"**{row['Size A']} + {row['Size B']}** — bought together {row['Co-occurrence']:,} times")
 
 
-# ─────────────────────────────────────────────
-# PAGE 13 — ABC-XYZ ANALYSIS
-# ─────────────────────────────────────────────
 elif page == "📊 ABC-XYZ Analysis":
     st.title("📊 ABC-XYZ Inventory Classification")
-    st.caption("ABC = revenue contribution | XYZ = demand consistency")
-
     with st.expander("🔍 Filters", expanded=True):
         flt = pi_filters(pi, "axyz")
-
     st.subheader("Classification Matrix")
     matrix_data = []
     for abc in ['A','B','C']:
@@ -1008,102 +858,61 @@ elif page == "📊 ABC-XYZ Analysis":
         matrix_data.append(row)
     matrix_df = pd.DataFrame(matrix_data).set_index('ABC')
     st.dataframe(matrix_df, use_container_width=True)
-
     st.divider()
-    st.subheader("What Each Classification Means")
     st.markdown("""
-    | Class | Products | Stock Strategy | Reorder Strategy |
-    |-------|----------|---------------|-----------------|
-    | **AX** | High revenue + very consistent | Never stockout — keep 3 months | Auto reorder at 1 month |
-    | **AY** | High revenue + moderate consistency | Keep 2 months stock | Reorder at 6 weeks |
-    | **AZ** | High revenue + erratic demand | Keep 1 month + safety stock | Order on demand |
-    | **BX** | Medium revenue + consistent | Keep 2 months | Reorder at 6 weeks |
-    | **BY** | Medium revenue + moderate | Keep 1.5 months | Reorder at 1 month |
-    | **BZ** | Medium revenue + erratic | Keep minimal | Order on demand |
-    | **CX** | Low revenue + consistent | Minimum stock | Reorder quarterly |
-    | **CY** | Low revenue + moderate | Very minimal | Order on demand |
-    | **CZ** | Low revenue + erratic | **Liquidate or discontinue** | Do not reorder |
+    | Class | Stock Strategy | Reorder Strategy |
+    |-------|---------------|-----------------|
+    | **AX** | Never stockout — keep 3 months | Auto reorder at 1 month |
+    | **AY** | Keep 2 months stock | Reorder at 6 weeks |
+    | **AZ** | Keep 1 month + safety stock | Order on demand |
+    | **BX** | Keep 2 months | Reorder at 6 weeks |
+    | **BY** | Keep 1.5 months | Reorder at 1 month |
+    | **BZ** | Keep minimal | Order on demand |
+    | **CZ** | **Liquidate or discontinue** | Do not reorder |
     """)
-
     st.divider()
     c1,c2 = st.columns(2)
-    with c1:
-        abc_sel = st.selectbox("Filter ABC", ['All','A','B','C'], key="axyz_abc")
-    with c2:
-        xyz_sel = st.selectbox("Filter XYZ", ['All','X','Y','Z'], key="axyz_xyz")
-
+    with c1: abc_sel = st.selectbox("Filter ABC", ['All','A','B','C'], key="axyz_abc")
+    with c2: xyz_sel = st.selectbox("Filter XYZ", ['All','X','Y','Z'], key="axyz_xyz")
     flt2 = flt.copy()
     if abc_sel!='All': flt2=flt2[flt2['ABC']==abc_sel]
     if xyz_sel!='All': flt2=flt2[flt2['XYZ']==xyz_sel]
     flt2 = flt2.sort_values('Total Revenue', ascending=False)
-
-    st.caption(f"Showing {len(flt2):,} products — {fmt_m(flt2['Stock Value PKR'].sum())} stock value")
-    disp_cols = ['Product No.','Brand Name','Category','Size','ABC_XYZ','ABC','XYZ','Consistency %','Total Revenue','Stock Value PKR','Current Stock Sqm','Sales Velocity/Month','Inventory Status']
+    disp_cols = ['Product No.','Brand Name','Category','Size','ABC_XYZ','ABC','XYZ','Consistency %','Total Revenue','Stock Value PKR','Current Stock Sqm','Sales Velocity/Month','Reorder Score','Inventory Status']
     st.dataframe(flt2[disp_cols], hide_index=True, use_container_width=True)
     st.download_button("📥 Download", flt2[disp_cols].to_csv(index=False), "abc_xyz.csv", "text/csv")
 
 
-# ─────────────────────────────────────────────
-# PAGE 14 — SELL THROUGH
-# ─────────────────────────────────────────────
 elif page == "📉 Sell Through":
     st.title("📉 Sell Through Rate Analysis")
-    st.caption("Sell Through % = Total Sold / Total Purchased × 100")
-
     with st.expander("🔍 Filters", expanded=True):
         flt = pi_filters(pi, "str")
-
     c1,c2,c3,c4 = st.columns(4)
     c1.metric("Avg Sell Through",    f"{flt['Sell Through %'].mean():.1f}%")
     c2.metric("Products >80%",       f"{(flt['Sell Through %']>80).sum():,}")
     c3.metric("Products 20-80%",     f"{((flt['Sell Through %']>=20)&(flt['Sell Through %']<=80)).sum():,}")
     c4.metric("Products <20%",       f"{(flt['Sell Through %']<20).sum():,}")
-
     st.divider()
     c1,c2 = st.columns(2)
-    with c1:
-        min_st = st.slider("Min Sell Through %", 0, 100, 0, key="str_min")
-    with c2:
-        max_st = st.slider("Max Sell Through %", 0, 200, 200, key="str_max")
-
-    flt2 = flt[(flt['Sell Through %']>=min_st)&(flt['Sell Through %']<=max_st)].copy()
-    flt2 = flt2.sort_values('Sell Through %', ascending=True)
-
+    with c1: min_st = st.slider("Min Sell Through %", 0, 100, 0, key="str_min")
+    with c2: max_st = st.slider("Max Sell Through %", 0, 200, 200, key="str_max")
+    flt2 = flt[(flt['Sell Through %']>=min_st)&(flt['Sell Through %']<=max_st)].copy().sort_values('Sell Through %')
     flt2['ST Category'] = flt2['Sell Through %'].apply(
-        lambda x: '🔴 <20% — Slow/Dead' if x<20
-        else ('🟡 20-50% — Below Average' if x<50
-        else ('🟢 50-80% — Good' if x<80
-        else ('✅ >80% — Excellent' if x<=100
-        else '⚠️ >100% — Check Data')))
-    )
-
-    st.caption(f"Showing {len(flt2):,} products")
+        lambda x: '🔴 <20%' if x<20 else ('🟡 20-50%' if x<50 else ('🟢 50-80%' if x<80 else ('✅ >80%' if x<=100 else '⚠️ >100%'))))
     disp = ['Product No.','Brand Name','Category','Size','Sell Through %','ST Category','Current Stock Sqm','Stock Value PKR','Net Sales Sqm','Sales Velocity/Month']
     st.dataframe(flt2[disp], hide_index=True, use_container_width=True)
     st.download_button("📥 Download", flt2[disp].to_csv(index=False), "sell_through.csv", "text/csv")
-
     st.divider()
     st.subheader("Sell Through by Brand")
-    br_st = flt.groupby('Brand Name').agg(
-        Products      =('Product No.','count'),
-        Avg_ST        =('Sell Through %','mean'),
-        Low_ST_Count  =('Sell Through %',lambda x:(x<20).sum()),
-        High_ST_Count =('Sell Through %',lambda x:(x>80).sum()),
-        Stock_Value   =('Stock Value PKR','sum')
-    ).reset_index().sort_values('Avg_ST',ascending=False)
-    br_st['Avg ST %']   = br_st['Avg_ST'].round(1)
-    br_st['Stock Value']= br_st['Stock_Value'].apply(fmt_m)
-    st.dataframe(br_st[['Brand Name','Products','Avg ST %','High_ST_Count','Low_ST_Count','Stock Value']], hide_index=True, use_container_width=True)
+    br_st = flt.groupby('Brand Name').agg(Products=('Product No.','count'),Avg_ST=('Sell Through %','mean'),Low=('Sell Through %',lambda x:(x<20).sum()),High=('Sell Through %',lambda x:(x>80).sum()),Val=('Stock Value PKR','sum')).reset_index().sort_values('Avg_ST',ascending=False)
+    br_st['Avg ST %']=br_st['Avg_ST'].round(1); br_st['Stock Value']=br_st['Val'].apply(fmt_m)
+    st.dataframe(br_st[['Brand Name','Products','Avg ST %','High','Low','Stock Value']], hide_index=True, use_container_width=True)
 
 
-# ─────────────────────────────────────────────
-# PAGE 15 — DEMAND FORECAST
-# ─────────────────────────────────────────────
 elif page == "🔮 Demand Forecast":
     st.title("🔮 Demand Forecast (30/60/90 Days)")
     with st.expander("🔍 Filters", expanded=True):
         flt = pi_filters(pi, "df")
-
     fast = flt[flt['Demand Pattern'].isin(['Stable Fast Mover','Volatile Fast Mover','Slow Stable'])].copy()
     fast = fast[fast['Sales Velocity/Month']>0]
     fast['Forecast 30 Days']    = (fast['Sales Velocity/Month']*1).round(2)
@@ -1111,67 +920,49 @@ elif page == "🔮 Demand Forecast":
     fast['Forecast 90 Days']    = (fast['Sales Velocity/Month']*3).round(2)
     fast['Stock Covers (Days)'] = (fast['Current Stock Sqm']/(fast['Sales Velocity/Month']/30)).round(0)
     fast['Stockout Risk']       = fast['Stock Covers (Days)'].apply(lambda x:'🔴 High' if x<=30 else ('🟡 Medium' if x<=60 else '🟢 Low'))
-
     risk_f = st.selectbox("Stockout Risk", ['All','🔴 High','🟡 Medium','🟢 Low'], key="df_risk")
     if risk_f!='All': fast=fast[fast['Stockout Risk']==risk_f]
     fast = fast.sort_values('Stock Covers (Days)')
-
-    st.caption(f"Showing {len(fast):,} products")
     disp=['Product No.','Brand Name','Category','Size','Current Stock Sqm','Sales Velocity/Month','Forecast 30 Days','Forecast 60 Days','Forecast 90 Days','Stock Covers (Days)','Stockout Risk']
     st.dataframe(fast[disp], hide_index=True, use_container_width=True)
     st.download_button("📥 Download", fast[disp].to_csv(index=False), "forecast.csv", "text/csv")
 
 
-# ─────────────────────────────────────────────
-# PAGE 16 — REORDER ALERTS
-# ─────────────────────────────────────────────
 elif page == "⚠️ Reorder Alerts":
     st.title("⚠️ Reorder Alerts")
     with st.expander("🔍 Filters", expanded=True):
         flt = pi_filters(pi, "ra")
-
     reorder = flt[(flt['Stock Health']=='Reorder Now')&(flt['Current Stock Sqm']>0)&(flt['Sales Velocity/Month']>0)].copy().sort_values('Sales Velocity/Month',ascending=False)
     reorder['Suggested Reorder Sqm']   = (reorder['Sales Velocity/Month']*3-reorder['Current Stock Sqm']).clip(lower=0).round(2)
     reorder['Suggested Reorder Boxes'] = (reorder['Suggested Reorder Sqm']/reorder['Sq.m/Box']).apply(lambda x: max(1,round(x)) if pd.notna(x) else 0)
     reorder['Reorder Value (Rs)']      = (reorder['Suggested Reorder Sqm']*reorder['WAC Rate']).round(0)
-
     c1,c2,c3=st.columns(3)
     c1.metric("Products Needing Reorder",f"{len(reorder):,}")
     c2.metric("Total Reorder Qty",       f"{reorder['Suggested Reorder Sqm'].sum():,.0f} sqm")
     c3.metric("Estimated Reorder Value", fmt_m(reorder['Reorder Value (Rs)'].sum()))
     st.divider()
-    cols=['Product No.','Brand Name','Category','Size','Current Stock Sqm','Months of Stock','Sales Velocity/Month','Suggested Reorder Sqm','Suggested Reorder Boxes','Reorder Value (Rs)']
+    cols=['Product No.','Brand Name','Category','Size','Current Stock Sqm','Months of Stock','Sales Velocity/Month','Reorder Score','Suggested Reorder Sqm','Suggested Reorder Boxes','Reorder Value (Rs)']
     st.dataframe(reorder[cols], hide_index=True, use_container_width=True)
     st.download_button("📥 Download", reorder[cols].to_csv(index=False), "reorder_alerts.csv", "text/csv")
 
 
-# ─────────────────────────────────────────────
-# PAGE — STOCK COMPARISON
-# ─────────────────────────────────────────────
 elif page == "📦 Stock Comparison":
     st.title("📦 Stock Level Comparison")
-    st.caption("Compare stock quantity and value between two periods")
-
     with st.expander("🔍 Period Selection & Filters", expanded=True):
         c1, c2 = st.columns(2)
         with c1:
             st.markdown("**Current Period**")
-            curr_end   = st.date_input("End Date",   value=df['Date'].max().date(),                                    key="sc_ce")
-            curr_start = st.date_input("Start Date", value=(df['Date'].max()-pd.Timedelta(days=30)).date(),            key="sc_cs")
+            curr_end   = st.date_input("End Date",   value=df['Date'].max().date(), key="sc_ce")
+            curr_start = st.date_input("Start Date", value=(df['Date'].max()-pd.Timedelta(days=30)).date(), key="sc_cs")
         with c2:
             st.markdown("**Previous Period**")
-            prev_end   = st.date_input("End Date",   value=(df['Date'].max()-pd.Timedelta(days=30)).date(),            key="sc_pe")
-            prev_start = st.date_input("Start Date", value=(df['Date'].max()-pd.Timedelta(days=60)).date(),            key="sc_ps")
-
+            prev_end   = st.date_input("End Date",   value=(df['Date'].max()-pd.Timedelta(days=30)).date(), key="sc_pe")
+            prev_start = st.date_input("Start Date", value=(df['Date'].max()-pd.Timedelta(days=60)).date(), key="sc_ps")
         c1,c2,c3,c4 = st.columns(4)
-        with c1:
-            br_f  = st.selectbox("Brand",    ['All']+sorted(df['Brand Name'].dropna().unique().tolist()),   key="sc_br")
-        with c2:
-            co_f  = st.selectbox("Company",  ['All']+sorted(df['Company Name'].dropna().unique().tolist()), key="sc_co")
-        with c3:
-            cat_f = st.selectbox("Category", ['All']+sorted(df['Category'].dropna().unique().tolist()),     key="sc_cat")
-        with c4:
-            sz_f  = st.selectbox("Size",     ['All']+sorted(prod['Size'].dropna().unique().tolist()),       key="sc_sz")
+        with c1: br_f  = st.selectbox("Brand",    ['All']+sorted(df['Brand Name'].dropna().unique().tolist()),   key="sc_br")
+        with c2: co_f  = st.selectbox("Company",  ['All']+sorted(df['Company Name'].dropna().unique().tolist()), key="sc_co")
+        with c3: cat_f = st.selectbox("Category", ['All']+sorted(df['Category'].dropna().unique().tolist()),     key="sc_cat")
+        with c4: sz_f  = st.selectbox("Size",     ['All']+sorted(prod['Size'].dropna().unique().tolist()),       key="sc_sz")
 
     @st.cache_data(ttl=3600)
     def stock_snapshot(_df, as_of):
@@ -1180,58 +971,44 @@ elif page == "📦 Stock Comparison":
         snap['Stock Value'] = snap['Stock Sqm'] * snap['WAC Rate']
         return snap
 
-    with st.spinner("Calculating stock snapshots..."):
+    with st.spinner("Calculating..."):
         curr_snap = stock_snapshot(df, curr_end)
         prev_snap = stock_snapshot(df, prev_end)
-
     curr_snap.columns = ['Product No.','Curr Sqm','Curr WAC','Curr Value']
     prev_snap.columns = ['Product No.','Prev Sqm','Prev WAC','Prev Value']
-
     comp = curr_snap.merge(prev_snap, on='Product No.', how='outer').fillna(0)
     comp = comp.merge(prod[['Product No.','Brand Name','Category','Size','Company Name']], on='Product No.', how='left')
     comp['Sqm Change']   = comp['Curr Sqm']   - comp['Prev Sqm']
     comp['Value Change'] = comp['Curr Value'] - comp['Prev Value']
     comp['Sqm Change %'] = (comp['Sqm Change'] / comp['Prev Sqm'].replace(0, np.nan) * 100).round(1)
     comp['Direction']    = comp['Sqm Change'].apply(lambda x: '🔺 Up' if x>0 else ('🔻 Down' if x<0 else '➡️ Same'))
-
     flt = comp.copy()
     if br_f  != 'All': flt = flt[flt['Brand Name']   == br_f]
     if co_f  != 'All': flt = flt[flt['Company Name'] == co_f]
     if cat_f != 'All': flt = flt[flt['Category']     == cat_f]
     if sz_f  != 'All': flt = flt[flt['Size']         == sz_f]
-
     st.divider()
     c1,c2,c3,c4 = st.columns(4)
-    sqm_delta = flt['Sqm Change'].sum()
-    val_delta = flt['Value Change'].sum()
-    c1.metric("Current Stock Sqm",   f"{flt['Curr Sqm'].sum():,.0f}",  delta=f"{sqm_delta:+,.0f} sqm")
-    c2.metric("Current Stock Value",  fmt_m(flt['Curr Value'].sum()),   delta=fmt_m(val_delta))
-    c3.metric("Products Increased",   f"{(flt['Sqm Change']>0).sum():,}")
-    c4.metric("Products Decreased",   f"{(flt['Sqm Change']<0).sum():,}")
-
+    c1.metric("Current Stock Sqm",  f"{flt['Curr Sqm'].sum():,.0f}", delta=f"{flt['Sqm Change'].sum():+,.0f} sqm")
+    c2.metric("Current Stock Value", fmt_m(flt['Curr Value'].sum()), delta=fmt_m(flt['Value Change'].sum()))
+    c3.metric("Products Increased",  f"{(flt['Sqm Change']>0).sum():,}")
+    c4.metric("Products Decreased",  f"{(flt['Sqm Change']<0).sum():,}")
     st.divider()
     tab1, tab2, tab3 = st.tabs(["🏭 By Brand","📂 By Category","📦 By Product"])
-
     def make_comp_table(group_col, df_in):
-        t = df_in.groupby(group_col).agg(
-            Curr_Sqm  =('Curr Sqm',   'sum'),
-            Prev_Sqm  =('Prev Sqm',   'sum'),
-            Curr_Value=('Curr Value', 'sum'),
-            Prev_Value=('Prev Value', 'sum'),
-        ).reset_index()
-        t['Sqm Δ']     = t['Curr_Sqm']   - t['Prev_Sqm']
-        t['Value Δ']   = t['Curr_Value'] - t['Prev_Value']
-        t['Change %']  = (t['Sqm Δ'] / t['Prev_Sqm'].replace(0,np.nan) * 100).round(1)
-        t['Dir']       = t['Sqm Δ'].apply(lambda x: '🔺' if x>0 else ('🔻' if x<0 else '➡️'))
-        t['Curr Sqm']  = t['Curr_Sqm'].apply(lambda x: f"{x:,.0f}")
-        t['Prev Sqm']  = t['Prev_Sqm'].apply(lambda x: f"{x:,.0f}")
+        t = df_in.groupby(group_col).agg(Curr_Sqm=('Curr Sqm','sum'),Prev_Sqm=('Prev Sqm','sum'),Curr_Value=('Curr Value','sum'),Prev_Value=('Prev Value','sum')).reset_index()
+        t['Sqm Δ']     = t['Curr_Sqm']-t['Prev_Sqm']
+        t['Value Δ']   = t['Curr_Value']-t['Prev_Value']
+        t['Change %']  = (t['Sqm Δ']/t['Prev_Sqm'].replace(0,np.nan)*100).round(1)
+        t['Dir']       = t['Sqm Δ'].apply(lambda x:'🔺' if x>0 else ('🔻' if x<0 else '➡️'))
+        t['Curr Sqm']  = t['Curr_Sqm'].apply(lambda x:f"{x:,.0f}")
+        t['Prev Sqm']  = t['Prev_Sqm'].apply(lambda x:f"{x:,.0f}")
         t['Curr Value']= t['Curr_Value'].apply(fmt_m)
         t['Prev Value']= t['Prev_Value'].apply(fmt_m)
-        t['Sqm Change']= t['Sqm Δ'].apply(lambda x: f"+{x:,.0f}" if x>0 else f"{x:,.0f}")
-        t['Val Change']= t['Value Δ'].apply(lambda x: ("+"+fmt_m(x)) if x>0 else fmt_m(x))
-        cols = ['Dir', group_col, 'Prev Sqm', 'Curr Sqm', 'Sqm Change', 'Change %', 'Prev Value', 'Curr Value', 'Val Change']
+        t['Sqm Change']= t['Sqm Δ'].apply(lambda x:f"+{x:,.0f}" if x>0 else f"{x:,.0f}")
+        t['Val Change']= t['Value Δ'].apply(lambda x:("+"+fmt_m(x)) if x>0 else fmt_m(x))
+        cols = ['Dir',group_col,'Prev Sqm','Curr Sqm','Sqm Change','Change %','Prev Value','Curr Value','Val Change']
         return t.sort_values('Value Δ')[cols]
-
     with tab1: st.dataframe(make_comp_table('Brand Name', flt), hide_index=True, use_container_width=True)
     with tab2: st.dataframe(make_comp_table('Category', flt), hide_index=True, use_container_width=True)
     with tab3:
@@ -1239,13 +1016,298 @@ elif page == "📦 Stock Comparison":
         flt2  = flt.copy()
         if dir_f != 'All': flt2 = flt2[flt2['Direction']==dir_f]
         flt2 = flt2.sort_values('Value Change')
-        flt2['Curr Sqm']   = flt2['Curr Sqm'].apply(lambda x: f"{x:,.2f}")
-        flt2['Prev Sqm']   = flt2['Prev Sqm'].apply(lambda x: f"{x:,.2f}")
+        flt2['Curr Sqm']   = flt2['Curr Sqm'].apply(lambda x:f"{x:,.2f}")
+        flt2['Prev Sqm']   = flt2['Prev Sqm'].apply(lambda x:f"{x:,.2f}")
         flt2['Curr Value'] = flt2['Curr Value'].apply(fmt_m)
         flt2['Prev Value'] = flt2['Prev Value'].apply(fmt_m)
-        flt2['Sqm Δ']      = flt2['Sqm Change'].apply(lambda x: f"+{x:,.2f}" if x>0 else f"{x:,.2f}")
-        flt2['Val Δ']      = flt2['Value Change'].apply(lambda x: ("+"+fmt_m(x)) if x>0 else fmt_m(x))
-        flt2['Change %']   = flt2['Sqm Change %'].apply(lambda x: f"+{x}%" if pd.notna(x) and x>0 else f"{x}%")
-        st.caption(f"Showing {len(flt2):,} products")
+        flt2['Sqm Δ']      = flt2['Sqm Change'].apply(lambda x:f"+{x:,.2f}" if x>0 else f"{x:,.2f}")
+        flt2['Val Δ']      = flt2['Value Change'].apply(lambda x:("+"+fmt_m(x)) if x>0 else fmt_m(x))
+        flt2['Change %']   = flt2['Sqm Change %'].apply(lambda x:f"+{x}%" if pd.notna(x) and x>0 else f"{x}%")
         st.dataframe(flt2[['Direction','Product No.','Brand Name','Category','Size','Prev Sqm','Curr Sqm','Sqm Δ','Change %','Prev Value','Curr Value','Val Δ']], hide_index=True, use_container_width=True)
         st.download_button("📥 Download", flt2.to_csv(index=False), "stock_comparison.csv", "text/csv")
+
+
+elif page == "🔍 Search":
+    st.title("🔍 Universal Search")
+    query = st.text_input("Search — product, customer, brand, category, size, salesman...", placeholder="e.g. MONTAGE POLISH, IDREES BROTHER, 60 X 120...")
+    if query and len(query) >= 2:
+        q = query.upper()
+        tab1, tab2, tab3 = st.tabs(["📦 Products","👤 Customers","📋 Transactions"])
+        with tab1:
+            res = pi[pi['Product No.'].str.upper().str.contains(q,na=False)|pi['Brand Name'].str.upper().str.contains(q,na=False)|pi['Category'].str.upper().str.contains(q,na=False)|pi['Size'].str.upper().str.contains(q,na=False)|pi['Company Name'].str.upper().str.contains(q,na=False)].copy()
+            st.caption(f"{len(res)} products found")
+            if len(res)>0:
+                disp=['Product No.','Brand Name','Category','Size','Current Stock Sqm','Stock Value PKR','Reorder Score','Sales Velocity/Month','Inventory Status','Stock Health']
+                st.dataframe(res[disp], hide_index=True, use_container_width=True)
+                st.download_button("📥 Download", res[disp].to_csv(index=False), "search_products.csv")
+        with tab2:
+            sales_all2 = df[df['Type']=='S'].copy()
+            cr = sales_all2[sales_all2['Account Name'].str.upper().str.contains(q,na=False)].groupby('Account Name').agg(Revenue=('SALE','sum'),Bills=('Bill No.','nunique'),Products=('Product No.','nunique'),Last=('Date','max')).reset_index()
+            cr['Revenue']      = cr['Revenue'].apply(fmt_m)
+            cr['Last Purchase']= cr['Last'].dt.date
+            cr['Days Since']   = (pd.Timestamp.today()-cr['Last']).dt.days
+            st.caption(f"{len(cr)} customers found")
+            if len(cr)>0:
+                st.dataframe(cr[['Account Name','Revenue','Bills','Products','Last Purchase','Days Since']], hide_index=True, use_container_width=True)
+        with tab3:
+            tx = df[df['Product No.'].str.upper().str.contains(q,na=False)|df['Account Name'].str.upper().str.contains(q,na=False)|df['Salesman'].str.upper().str.contains(q,na=False)].copy().sort_values('Date',ascending=False).head(500)
+            st.caption(f"{len(tx)} transactions found (max 500)")
+            if len(tx)>0:
+                tx['Date2'] = tx['Date'].dt.strftime('%d-%m-%Y %H:%M')
+                st.dataframe(tx[['Date2','Type','Product No.','Account Name','Salesman','Sq.m','Rate','SALE','RETURN','Warehouse']], hide_index=True, use_container_width=True)
+    else:
+        st.info("Type at least 2 characters to search")
+
+
+elif page == "📊 Period Comparison":
+    st.title("📊 Period Comparison")
+    st.caption("Compare any two date ranges side by side")
+    c1,c2 = st.columns(2)
+    with c1:
+        st.markdown("**📅 Period A**")
+        pa_s = st.date_input("Start", value=(df['Date'].max()-pd.Timedelta(days=60)).date(), key="pa_s")
+        pa_e = st.date_input("End",   value=(df['Date'].max()-pd.Timedelta(days=31)).date(), key="pa_e")
+        pa_l = st.text_input("Label", value="Period A", key="pa_l")
+    with c2:
+        st.markdown("**📅 Period B**")
+        pb_s = st.date_input("Start", value=(df['Date'].max()-pd.Timedelta(days=30)).date(), key="pb_s")
+        pb_e = st.date_input("End",   value=df['Date'].max().date(), key="pb_e")
+        pb_l = st.text_input("Label", value="Period B", key="pb_l")
+    with st.expander("🔍 Filters", expanded=False):
+        c1,c2,c3,c4 = st.columns(4)
+        with c1: br_f  = st.selectbox("Brand",    ['All']+sorted(df['Brand Name'].dropna().unique().tolist()),   key="pc_br")
+        with c2: co_f  = st.selectbox("Company",  ['All']+sorted(df['Company Name'].dropna().unique().tolist()), key="pc_co")
+        with c3: cat_f = st.selectbox("Category", ['All']+sorted(df['Category'].dropna().unique().tolist()),     key="pc_cat")
+        with c4: sz_f  = st.selectbox("Size",     ['All']+sorted(prod['Size'].dropna().unique().tolist()),       key="pc_sz")
+    def apply_flt(dff):
+        if br_f !='All': dff=dff[dff['Brand Name']  ==br_f]
+        if co_f !='All': dff=dff[dff['Company Name']==co_f]
+        if cat_f!='All': dff=dff[dff['Category']    ==cat_f]
+        if sz_f !='All': dff=dff[dff['Size']        ==sz_f]
+        return dff
+    dfa = apply_flt(df[(df['Date'].dt.date>=pa_s)&(df['Date'].dt.date<=pa_e)])
+    dfb = apply_flt(df[(df['Date'].dt.date>=pb_s)&(df['Date'].dt.date<=pb_e)])
+    sa  = dfa[dfa['Type']=='S'].copy(); sb = dfb[dfb['Type']=='S'].copy()
+    ra  = dfa[dfa['Type']=='S.R'].copy(); rb = dfb[dfb['Type']=='S.R'].copy()
+    st.divider()
+    st.subheader("📊 Key Metrics Comparison")
+    def chg(a,b): return f"{((b-a)/a*100):+.1f}%" if a!=0 else "N/A"
+    def dir_(a,b): return "🔺" if b>a else ("🔻" if b<a else "➡️")
+    metrics = [
+        ("Gross Revenue",    sa['SALE'].sum(),          sb['SALE'].sum(),          True),
+        ("Sales Returns",    ra['RETURN'].sum(),         rb['RETURN'].sum(),         True),
+        ("Net Revenue",      sa['SALE'].sum()-ra['RETURN'].sum(), sb['SALE'].sum()-rb['RETURN'].sum(), True),
+        ("ERP Gross Profit", sa['Profit'].sum(),         sb['Profit'].sum(),         True),
+        ("Sqm Sold",         sa['Sq.m'].sum(),           sb['Sq.m'].sum(),           False),
+        ("Unique Customers", sa['Account Name'].nunique(),sb['Account Name'].nunique(),False),
+        ("Total Bills",      sa['Bill No.'].nunique(),   sb['Bill No.'].nunique(),   False),
+        ("Avg Bill Value",   sa['SALE'].sum()/max(sa['Bill No.'].nunique(),1), sb['SALE'].sum()/max(sb['Bill No.'].nunique(),1), True),
+    ]
+    if is_admin:
+        metrics.append(("Actual Gross Profit", sa['Actual Profit'].sum(), sb['Actual Profit'].sum(), True))
+    rows = []
+    for name,va,vb,is_money in metrics:
+        fmt = fmt_m if is_money else lambda x:f"{x:,.0f}"
+        rows.append({"Metric":name, pa_l:fmt(va), pb_l:fmt(vb),
+            "Change":("+"+fmt_m(vb-va)) if (vb-va)>0 and is_money else (fmt_m(vb-va) if is_money else f"{vb-va:+,.0f}"),
+            "Change %":chg(va,vb), "Dir":dir_(va,vb)})
+    st.dataframe(pd.DataFrame(rows), hide_index=True, use_container_width=True)
+    st.divider()
+    def pc_table(col):
+        a = sa.groupby(col).agg(Rev_A=('SALE','sum'),Sqm_A=('Sq.m','sum')).reset_index()
+        b = sb.groupby(col).agg(Rev_B=('SALE','sum'),Sqm_B=('Sq.m','sum')).reset_index()
+        t = a.merge(b, on=col, how='outer').fillna(0)
+        t['Rev Δ']  = t['Rev_B']-t['Rev_A']
+        t['Rev Δ%'] = (t['Rev Δ']/t['Rev_A'].replace(0,np.nan)*100).round(1)
+        t['Dir']    = t['Rev Δ'].apply(lambda x:'🔺' if x>0 else ('🔻' if x<0 else '➡️'))
+        t[f'{pa_l} Rev'] = t['Rev_A'].apply(fmt_m)
+        t[f'{pb_l} Rev'] = t['Rev_B'].apply(fmt_m)
+        t['Change'] = t['Rev Δ'].apply(lambda x:("+"+fmt_m(x)) if x>0 else fmt_m(x))
+        return t[['Dir',col,f'{pa_l} Rev',f'{pb_l} Rev','Change','Rev Δ%','Sqm_A','Sqm_B']].sort_values('Rev Δ',ascending=False)
+    tab1,tab2,tab3,tab4,tab5 = st.tabs(["🏭 Brand","📂 Category","👤 Customer","📦 Product","📐 Size"])
+    with tab1: st.dataframe(pc_table('Brand Name'),   hide_index=True, use_container_width=True)
+    with tab2: st.dataframe(pc_table('Category'),     hide_index=True, use_container_width=True)
+    with tab3: st.dataframe(pc_table('Account Name'), hide_index=True, use_container_width=True)
+    with tab4: st.dataframe(pc_table('Product No.'),  hide_index=True, use_container_width=True)
+    with tab5: st.dataframe(pc_table('Size'),         hide_index=True, use_container_width=True)
+
+
+elif page == "📦 Closing Stock":
+    st.title("📦 Closing Stock Report")
+    with st.expander("🔍 Filters", expanded=True):
+        flt = pi_filters(pi, "csr")
+    flt2 = flt[flt['Current Stock Sqm']>0].copy().sort_values('Stock Value PKR',ascending=False)
+    c1,c2,c3,c4 = st.columns(4)
+    c1.metric("Products in Stock",  f"{len(flt2):,}")
+    c2.metric("Total Stock Sqm",    f"{flt2['Current Stock Sqm'].sum():,.0f}")
+    c3.metric("Total Stock Value",  fmt_m(flt2['Stock Value PKR'].sum()))
+    c4.metric("Avg WAC Rate",       f"Rs {flt2['WAC Rate'].mean():,.0f}")
+    st.divider()
+    tab1,tab2,tab3,tab4 = st.tabs(["📦 By Product","🏭 By Brand","📂 By Category","📐 By Size"])
+    with tab1:
+        disp=['Product No.','Brand Name','Category','Size','Current Stock Sqm','WAC Rate','Stock Value PKR','Inventory Status','Stock Health','Days Since Last Sale']
+        st.dataframe(flt2[disp], hide_index=True, use_container_width=True)
+        st.download_button("📥 Download", flt2[disp].to_csv(index=False), "closing_stock.csv")
+    with tab2:
+        bs = flt2.groupby('Brand Name').agg(Products=('Product No.','count'),Sqm=('Current Stock Sqm','sum'),Val=('Stock Value PKR','sum'),WAC=('WAC Rate','mean')).reset_index().sort_values('Val',ascending=False)
+        bs['Stock Value']=bs['Val'].apply(fmt_m); bs['% of Total']=(bs['Val']/flt2['Stock Value PKR'].sum()*100).round(1); bs['Avg WAC']=bs['WAC'].round(0)
+        st.dataframe(bs[['Brand Name','Products','Sqm','Stock Value','Avg WAC','% of Total']], hide_index=True, use_container_width=True)
+    with tab3:
+        cs = flt2.groupby('Category').agg(Products=('Product No.','count'),Sqm=('Current Stock Sqm','sum'),Val=('Stock Value PKR','sum')).reset_index().sort_values('Val',ascending=False)
+        cs['Stock Value']=cs['Val'].apply(fmt_m); cs['% of Total']=(cs['Val']/flt2['Stock Value PKR'].sum()*100).round(1)
+        st.dataframe(cs[['Category','Products','Sqm','Stock Value','% of Total']], hide_index=True, use_container_width=True)
+    with tab4:
+        ss = flt2.groupby('Size').agg(Products=('Product No.','count'),Sqm=('Current Stock Sqm','sum'),Val=('Stock Value PKR','sum')).reset_index().sort_values('Val',ascending=False)
+        ss['Stock Value']=ss['Val'].apply(fmt_m); ss['% of Total']=(ss['Val']/flt2['Stock Value PKR'].sum()*100).round(1)
+        st.dataframe(ss[['Size','Products','Sqm','Stock Value','% of Total']], hide_index=True, use_container_width=True)
+
+
+elif page == "📋 Income Statement":
+    if st.session_state['role'] not in ['admin','manager']: st.error("Access denied."); st.stop()
+    st.title("📋 Income Statement")
+    with st.expander("📅 Select Period", expanded=True):
+        c1,c2 = st.columns(2)
+        with c1: is_s = st.date_input("From", value=df['Date'].min().date(), key="is_s")
+        with c2: is_e = st.date_input("To",   value=df['Date'].max().date(), key="is_e")
+    dff2  = df[(df['Date'].dt.date>=is_s)&(df['Date'].dt.date<=is_e)]
+    sal2  = dff2[dff2['Type']=='S'].copy()
+    ret2  = dff2[dff2['Type']=='S.R'].copy()
+    pur2  = dff2[dff2['Type'].isin(['P','O.S'])].copy()
+    retp2 = dff2[dff2['Type']=='P.R'].copy()
+    gross_rev = sal2['SALE'].sum()
+    sales_ret = ret2['RETURN'].sum()
+    net_rev   = gross_rev - sales_ret
+    cogs      = (pur2['Sq.m']*pur2['Rate']).sum() - (retp2['Sq.m']*retp2['Rate']).sum()
+    erp_gp    = sal2['Profit'].sum()
+    actual_gp = sal2['Actual Profit'].sum()
+    st.divider()
+    st.subheader("📊 Trading Account")
+    trading_rows = [
+        {"Item":"Gross Sales Revenue",      "Amount (Rs)":fmt_m(gross_rev)},
+        {"Item":"Less: Sales Returns",      "Amount (Rs)":f"({fmt_m(sales_ret)})"},
+        {"Item":"Net Sales Revenue",        "Amount (Rs)":fmt_m(net_rev)},
+        {"Item":"─────────────────",        "Amount (Rs)":""},
+        {"Item":"Cost of Goods Purchased",  "Amount (Rs)":fmt_m(cogs)},
+        {"Item":"ERP Gross Profit",         "Amount (Rs)":fmt_m(erp_gp)},
+        {"Item":"ERP Gross Margin %",       "Amount (Rs)":f"{erp_gp/gross_rev*100:.1f}%" if gross_rev>0 else "N/A"},
+    ]
+    if is_admin:
+        trading_rows += [
+            {"Item":"Actual Gross Profit",  "Amount (Rs)":fmt_m(actual_gp)},
+            {"Item":"Actual Gross Margin %","Amount (Rs)":f"{actual_gp/gross_rev*100:.1f}%" if gross_rev>0 else "N/A"},
+            {"Item":"Hidden Profit",        "Amount (Rs)":fmt_m(actual_gp-erp_gp)},
+        ]
+    st.dataframe(pd.DataFrame(trading_rows), hide_index=True, use_container_width=True)
+    st.divider()
+    st.subheader("📊 Operating Expenses")
+    st.caption("Enter your actual monthly expenses — these are not saved, re-enter each session")
+    total_expenses = 0
+    for category, items in EXPENSES_TEMPLATE.items():
+        with st.expander(f"💼 {category}", expanded=False):
+            cols = st.columns(min(len(items),3))
+            for i,(item,default) in enumerate(items.items()):
+                with cols[i%3]:
+                    val = st.number_input(item, value=default, step=1000, key=f"exp_{category}_{item}")
+                    total_expenses += val
+    st.divider()
+    st.subheader("📊 Net Profit Summary")
+    net_erp    = erp_gp    - total_expenses
+    net_actual = actual_gp - total_expenses
+    pnl_rows = [
+        {"Item":"ERP Gross Profit",       "Amount (Rs)":fmt_m(erp_gp)},
+        {"Item":"Less: Total Expenses",   "Amount (Rs)":f"({fmt_m(total_expenses)})"},
+        {"Item":"ERP Net Profit",         "Amount (Rs)":fmt_m(net_erp)},
+        {"Item":"ERP Net Margin %",       "Amount (Rs)":f"{net_erp/gross_rev*100:.1f}%" if gross_rev>0 else "N/A"},
+    ]
+    if is_admin:
+        pnl_rows += [
+            {"Item":"Actual Net Profit",  "Amount (Rs)":fmt_m(net_actual)},
+            {"Item":"Actual Net Margin %","Amount (Rs)":f"{net_actual/gross_rev*100:.1f}%" if gross_rev>0 else "N/A"},
+        ]
+    st.dataframe(pd.DataFrame(pnl_rows), hide_index=True, use_container_width=True)
+    st.divider()
+    st.subheader("📈 Monthly Trend")
+    mt = sal2.groupby('Month').agg(Revenue=('SALE','sum'),ERP_GP=('Profit','sum'),Act_GP=('Actual Profit','sum'),Sqm=('Sq.m','sum'),Bills=('Bill No.','nunique')).reset_index()
+    mt_r = ret2.groupby('Month').agg(Returns=('RETURN','sum')).reset_index()
+    mt = mt.merge(mt_r, on='Month', how='left').fillna(0).sort_values('Month')
+    mt['Net Rev']  = mt['Revenue']-mt['Returns']
+    mt['ERP M%']   = (mt['ERP_GP']/mt['Revenue']*100).round(1)
+    mt['Revenue']  = mt['Revenue'].apply(fmt_m)
+    mt['Returns']  = mt['Returns'].apply(fmt_m)
+    mt['Net Rev']  = mt['Net Rev'].apply(fmt_m)
+    mt['ERP GP']   = mt['ERP_GP'].apply(fmt_m)
+    disp = ['Month','Revenue','Returns','Net Rev','ERP GP','ERP M%','Sqm','Bills']
+    if is_admin:
+        mt['Act M%'] = (mt['Act_GP']/mt['ERP_GP']*mt['ERP M%']).round(1)
+        mt['Act GP'] = mt['Act_GP'].apply(fmt_m)
+        disp += ['Act GP','Act M%']
+    st.dataframe(mt[disp], hide_index=True, use_container_width=True)
+    st.download_button("📥 Download", mt.to_csv(index=False), "income_statement.csv")
+
+
+elif page == "🏦 Assets Position":
+    if not is_admin: st.error("Admin only."); st.stop()
+    st.title("🏦 Assets & Liabilities Position")
+    inv_value = pi[pi['Current Stock Sqm']>0]['Stock Value PKR'].sum()
+    st.info(f"📦 Inventory Value (auto from stock data): **{fmt_m(inv_value)}**")
+    st.subheader("Current Assets")
+    c1,c2,c3 = st.columns(3)
+    with c1: cash_hand   = st.number_input("Cash in Hand (Rs)",          value=0, step=10000, key="ca_ch")
+    with c2: cash_bank   = st.number_input("Cash at Bank (Rs)",          value=0, step=10000, key="ca_cb")
+    with c3: receivables = st.number_input("Trade Receivables (Rs)",     value=0, step=10000, key="ca_tr")
+    c1,c2 = st.columns(2)
+    with c1: advances  = st.number_input("Advances to Suppliers (Rs)", value=0, step=10000, key="ca_ad")
+    with c2: other_ca  = st.number_input("Other Current Assets (Rs)",  value=0, step=10000, key="ca_ot")
+    total_ca = cash_hand + cash_bank + receivables + advances + other_ca + inv_value
+    st.subheader("Fixed Assets")
+    c1,c2,c3,c4 = st.columns(4)
+    with c1: furniture = st.number_input("Furniture & Fixtures (Rs)", value=0, step=10000, key="fa_ff")
+    with c2: vehicles  = st.number_input("Vehicles (Rs)",             value=0, step=10000, key="fa_vh")
+    with c3: equipment = st.number_input("Equipment (Rs)",            value=0, step=10000, key="fa_eq")
+    with c4: building  = st.number_input("Building/Leasehold (Rs)",   value=0, step=10000, key="fa_bl")
+    total_fa = furniture + vehicles + equipment + building
+    st.subheader("Liabilities")
+    c1,c2,c3,c4 = st.columns(4)
+    with c1: payables = st.number_input("Trade Payables (Rs)",    value=0, step=10000, key="li_tp")
+    with c2: st_loans = st.number_input("Short Term Loans (Rs)",  value=0, step=10000, key="li_sl")
+    with c3: lt_loans = st.number_input("Long Term Loans (Rs)",   value=0, step=10000, key="li_ll")
+    with c4: other_li = st.number_input("Other Liabilities (Rs)", value=0, step=10000, key="li_ot")
+    total_liab = payables + st_loans + lt_loans + other_li
+    total_assets = total_ca + total_fa
+    net_worth    = total_assets - total_liab
+    st.divider()
+    c1,c2,c3 = st.columns(3)
+    c1.metric("Total Assets",      fmt_m(total_assets))
+    c2.metric("Total Liabilities", fmt_m(total_liab))
+    c3.metric("Net Worth",         fmt_m(net_worth))
+    st.subheader("📊 Balance Sheet")
+    bs_rows = [
+        {"Item":"═══ CURRENT ASSETS ═══",     "Amount":""},
+        {"Item":"Cash in Hand",               "Amount":fmt_m(cash_hand)},
+        {"Item":"Cash at Bank",               "Amount":fmt_m(cash_bank)},
+        {"Item":"Trade Receivables",          "Amount":fmt_m(receivables)},
+        {"Item":"Advances to Suppliers",      "Amount":fmt_m(advances)},
+        {"Item":"Inventory (Auto from data)", "Amount":fmt_m(inv_value)},
+        {"Item":"Other Current Assets",       "Amount":fmt_m(other_ca)},
+        {"Item":"TOTAL CURRENT ASSETS",       "Amount":fmt_m(total_ca)},
+        {"Item":"","Amount":""},
+        {"Item":"═══ FIXED ASSETS ═══",       "Amount":""},
+        {"Item":"Furniture & Fixtures",       "Amount":fmt_m(furniture)},
+        {"Item":"Vehicles",                   "Amount":fmt_m(vehicles)},
+        {"Item":"Equipment",                  "Amount":fmt_m(equipment)},
+        {"Item":"Building/Leasehold",         "Amount":fmt_m(building)},
+        {"Item":"TOTAL FIXED ASSETS",         "Amount":fmt_m(total_fa)},
+        {"Item":"","Amount":""},
+        {"Item":"TOTAL ASSETS",               "Amount":fmt_m(total_assets)},
+        {"Item":"","Amount":""},
+        {"Item":"═══ LIABILITIES ═══",        "Amount":""},
+        {"Item":"Trade Payables",             "Amount":fmt_m(payables)},
+        {"Item":"Short Term Loans",           "Amount":fmt_m(st_loans)},
+        {"Item":"Long Term Loans",            "Amount":fmt_m(lt_loans)},
+        {"Item":"Other Liabilities",          "Amount":fmt_m(other_li)},
+        {"Item":"TOTAL LIABILITIES",          "Amount":fmt_m(total_liab)},
+        {"Item":"","Amount":""},
+        {"Item":"NET WORTH",                  "Amount":fmt_m(net_worth)},
+    ]
+    st.dataframe(pd.DataFrame(bs_rows), hide_index=True, use_container_width=True)
+    st.download_button("📥 Download", pd.DataFrame(bs_rows).to_csv(index=False), "balance_sheet.csv")
