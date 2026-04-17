@@ -126,7 +126,7 @@ def load_data(path):
     buffer.seek(0)
     prod = pd.read_excel(buffer, sheet_name='PRODUCT DATA')
 
-    def parse_dates(val):
+def parse_dates(val):
     s = str(val).strip()
     try:
         # Standard text format
