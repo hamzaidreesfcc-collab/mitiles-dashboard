@@ -153,8 +153,8 @@ def parse_dates(val):
     ret_mask = (df['RETURN'] == 0) & (df['Type'] == 'S.R')
     df.loc[ret_mask, 'RETURN'] = df.loc[ret_mask, 'Sq.m'] * df.loc[ret_mask, 'Rate']
 
-    import re
-    def clean_prod(x):
+import re
+def clean_prod(x):
     x = str(x).replace('\xa0', ' ')
     x = re.sub(r' +', ' ', x)  # collapse multiple spaces to one
     return x.strip()
