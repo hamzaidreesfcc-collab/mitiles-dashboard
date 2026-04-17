@@ -141,7 +141,20 @@ def load_data(path):
     prod = pd.read_excel(buffer, sheet_name='PRODUCT DATA')
 
     df['Date']       = df['Date'].apply(_parse_date)
-    df = df.sort_values(['Product No.','Date','Bill No.']).reset_index(drop=True)
+    # Ensure correct data types before sorting
+df['Product No.'] = df['Product No.'].astype(str).fillna('')
+df['Bill No.'] = df['Bill No.'].astype(str).fillna('')
+
+# Remove rows where Date failed to parse
+df = df[df['Date'].notna()]
+
+# Now sort safely
+df = df.sort_values(
+    by=['Product No.','Date','Bill No.'],
+    ascending=[True,True,True],
+    kind='mergesort'
+).reset_index(drop=True)
+df['Date'] = pd.to_datetime(df['Date'], errors='coerce', dayfirst=True)
     df['Sale Day']   = df['Date'].dt.date
     df['Month']      = df['Date'].dt.to_period('M').astype(str)
     df['Year']       = df['Date'].dt.year
