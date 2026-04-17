@@ -98,14 +98,12 @@ is_admin = st.session_state['role'] == 'admin'
 # DATA LOADING
 # ─────────────────────────────────────────────
 def _parse_date(val):
-    s = str(val).strip()
     try:
-        return pd.to_datetime(s, format='%d-%m-%Y   %I:%M %p')
+        s = str(val).replace('\xa0',' ').strip()
+        return pd.to_datetime(s, dayfirst=True, errors='coerce')
     except:
-        try:
-            return pd.Timestamp('1899-12-30') + pd.Timedelta(days=float(s))
-        except:
-            return pd.NaT
+        return pd.NaT
+
 
 def _clean_prod(x):
     x = str(x).replace('\xa0', ' ')
@@ -143,6 +141,7 @@ def load_data(path):
     prod = pd.read_excel(buffer, sheet_name='PRODUCT DATA')
 
     df['Date']       = df['Date'].apply(_parse_date)
+    df = df.sort_values(['Product No.','Date','Bill No.']).reset_index(drop=True)
     df['Sale Day']   = df['Date'].dt.date
     df['Month']      = df['Date'].dt.to_period('M').astype(str)
     df['Year']       = df['Date'].dt.year
@@ -1268,3 +1267,4 @@ elif page == "📊 Salesman Rate Analysis":
         st.subheader("🏅 Leaderboard — Most Products with Best Rate")
         board=sal_prod2.loc[sal_prod2.groupby('Product No.')['Avg Rate'].idxmax()].groupby('Salesman').size().reset_index(name='Products with Best Rate').sort_values('Products with Best Rate',ascending=False)
         st.dataframe(board, hide_index=True, use_container_width=True)
+
