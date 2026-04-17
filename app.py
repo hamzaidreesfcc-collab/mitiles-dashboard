@@ -126,7 +126,19 @@ def load_data(path):
     buffer.seek(0)
     prod = pd.read_excel(buffer, sheet_name='PRODUCT DATA')
 
-    df['Date'] = pd.to_datetime(df['Date'].astype(str).str.strip(), format='%d-%m-%Y   %I:%M %p', errors='coerce')
+    def parse_dates(val):
+    s = str(val).strip()
+    try:
+        # Standard text format
+        return pd.to_datetime(s, format='%d-%m-%Y   %I:%M %p')
+    except:
+        try:
+            # Excel serial number (copy-paste artifact)
+            return pd.Timestamp('1899-12-30') + pd.Timedelta(days=float(s))
+        except:
+            return pd.NaT
+
+    df['Date'] = df['Date'].apply(parse_dates)
     df['Sale Day'] = df['Date'].dt.date
     df['Month']    = df['Date'].dt.to_period('M').astype(str)
     df['Year']     = df['Date'].dt.year
@@ -141,8 +153,14 @@ def load_data(path):
     ret_mask = (df['RETURN'] == 0) & (df['Type'] == 'S.R')
     df.loc[ret_mask, 'RETURN'] = df.loc[ret_mask, 'Sq.m'] * df.loc[ret_mask, 'Rate']
 
-    df['Product No.']  = df['Product No.'].astype(str).str.replace('\xa0',' ').str.strip()
-    prod['Product No.']= prod['Product No.'].astype(str).str.replace('\xa0',' ').str.strip()
+    import re
+    def clean_prod(x):
+    x = str(x).replace('\xa0', ' ')
+    x = re.sub(r' +', ' ', x)  # collapse multiple spaces to one
+    return x.strip()
+
+df['Product No.']   = df['Product No.'].apply(clean_prod)
+prod['Product No.'] = prod['Product No.'].apply(clean_prod)
 
     if 'Size' in df.columns: df = df.drop(columns=['Size'])
     df = df.merge(prod[['Product No.','Brand Name','Category','Sub-Category','Size','Company Name','Sq.m/Box']], on='Product No.', how='left')
