@@ -154,7 +154,7 @@ df = df.sort_values(
     ascending=[True,True,True],
     kind='mergesort'
 ).reset_index(drop=True)
-df['Date'] = pd.to_datetime(df['Date'], errors='coerce', dayfirst=True)
+    df['Date'] = pd.to_datetime(df['Date'], errors='coerce', dayfirst=True)
     df['Sale Day']   = df['Date'].dt.date
     df['Month']      = df['Date'].dt.to_period('M').astype(str)
     df['Year']       = df['Date'].dt.year
