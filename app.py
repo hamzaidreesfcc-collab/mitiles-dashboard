@@ -1,3 +1,4 @@
+import re
 import streamlit as st
 import pandas as pd
 import numpy as np
@@ -153,14 +154,14 @@ def parse_dates(val):
     ret_mask = (df['RETURN'] == 0) & (df['Type'] == 'S.R')
     df.loc[ret_mask, 'RETURN'] = df.loc[ret_mask, 'Sq.m'] * df.loc[ret_mask, 'Rate']
 
-import re
+
 def clean_prod(x):
     x = str(x).replace('\xa0', ' ')
     x = re.sub(r' +', ' ', x)  # collapse multiple spaces to one
     return x.strip()
 
-df['Product No.']   = df['Product No.'].apply(clean_prod)
-prod['Product No.'] = prod['Product No.'].apply(clean_prod)
+    df['Product No.']   = df['Product No.'].apply(clean_prod)
+    prod['Product No.'] = prod['Product No.'].apply(clean_prod)
 
     if 'Size' in df.columns: df = df.drop(columns=['Size'])
     df = df.merge(prod[['Product No.','Brand Name','Category','Sub-Category','Size','Company Name','Sq.m/Box']], on='Product No.', how='left')
