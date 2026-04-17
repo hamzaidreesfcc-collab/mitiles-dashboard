@@ -5,6 +5,10 @@ from datetime import datetime, timedelta
 from itertools import combinations
 import time
 import google.auth.transport.requests
+import smtplib
+import random
+from email.mime.text import MIMEText
+from email.mime.multipart import MIMEMultipart
 st.set_page_config(page_title="Mi-Tiles Intelligence", page_icon="🏠", layout="wide", initial_sidebar_state="expanded")
 
 DATA_PATH = st.secrets.get("DATA_PATH", r"C:\Users\hp\OneDrive\Desktop\5.3.25.xlsx")
@@ -30,6 +34,32 @@ ASSETS_TEMPLATE = {
     "Liabilities":    {"Trade Payables": 0, "Short Term Loans": 0, "Long Term Loans": 0, "Other Liabilities": 0}
 }
 
+def send_login_alert(username, ip_info="Streamlit Cloud"):
+    try:
+        alert_email = st.secrets.get("ALERT_EMAIL", "")
+        smtp_pass   = st.secrets.get("SMTP_PASSWORD", "")
+        if not alert_email or not smtp_pass:
+            return
+        msg = MIMEMultipart()
+        msg['From']    = alert_email
+        msg['To']      = alert_email
+        msg['Subject'] = f"🔐 Mi-Tiles Login Alert — {username}"
+        body = f"""
+Mi-Tiles Dashboard Login Alert
+
+User:     {username}
+Time:     {datetime.now().strftime('%d %b %Y %H:%M:%S')}
+Location: {ip_info}
+
+If this was not you, change your password immediately.
+        """
+        msg.attach(MIMEText(body, 'plain'))
+        with smtplib.SMTP_SSL('smtp.gmail.com', 465) as server:
+            server.login(alert_email, smtp_pass)
+            server.send_message(msg)
+    except Exception:
+        pass  # Silent fail — never block login due to email issues
+
 # ─────────────────────────────────────────────
 # LOGIN
 # ─────────────────────────────────────────────
@@ -46,6 +76,7 @@ def login():
         if st.button("Login", use_container_width=True):
             if u in USERS and USERS[u]["password"] == p:
                 st.session_state.update({'logged_in':True,'user':u,'role':USERS[u]["role"],'name':USERS[u]["name"],'last_active':time.time()})
+                send_login_alert(u)
                 st.rerun()
             else:
                 st.error("Invalid username or password")
@@ -284,6 +315,7 @@ with st.sidebar:
         "📉 Sell Through","🔮 Demand Forecast","⚠️ Reorder Alerts",
         "📦 Stock Comparison","🔍 Search","📊 Period Comparison",
         "📦 Closing Stock","📋 Income Statement","🏦 Assets Position",
+        "📊 Salesman Rate Analysis",
     ], label_visibility="collapsed")
     st.divider()
     if st.button("🔄 Refresh Data"): st.cache_data.clear(); st.rerun()
@@ -431,7 +463,23 @@ elif page == "📈 Sales Trends":
         monthly['Actual Profit']  = monthly['Act_P'].apply(fmt_m)
         monthly['Actual M%']      = (monthly['Act_P']/monthly['Sale_Val']*100).round(1)
         disp += ['Actual Profit','Actual M%']
-    st.dataframe(monthly[disp], hide_index=True, use_container_width=True)
+    # Totals row
+    tot = {c: '' for c in disp}
+    tot['Month']      = '📊 TOTAL'
+    tot['Sale Value'] = fmt_m(monthly['Sale_Val'].sum())
+    tot['Sale_Sqm']   = round(monthly['Sale_Sqm'].sum(), 1)
+    tot['Ret Value']  = fmt_m(monthly['Ret_Val'].sum())
+    tot['Ret_Sqm']    = round(monthly['Ret_Sqm'].sum(), 1)
+    tot['Net']        = fmt_m(monthly['Net Value'].sum())
+    tot['Net Sqm']    = round(monthly['Net Sqm'].sum(), 1)
+    tot['ERP Profit'] = fmt_m(monthly['ERP_P'].sum())
+    tot['ERP M%']     = round(monthly['ERP_P'].sum()/monthly['Sale_Val'].sum()*100, 1) if monthly['Sale_Val'].sum()>0 else 0
+    tot['Bills']      = monthly['Bills'].sum()
+    if is_admin:
+        tot['Actual Profit'] = fmt_m(monthly['Act_P'].sum())
+        tot['Actual M%']     = round(monthly['Act_P'].sum()/monthly['Sale_Val'].sum()*100, 1) if monthly['Sale_Val'].sum()>0 else 0
+    monthly_with_tot = pd.concat([monthly[disp], pd.DataFrame([tot])], ignore_index=True)
+    st.dataframe(monthly_with_tot, hide_index=True, use_container_width=True)
     st.divider()
 
     st.subheader("All Products by Revenue")
@@ -704,6 +752,23 @@ elif page == "🧑‍💼 Salesman Performance":
     d=['Salesman','Revenue (Rs)','Net Rev (Rs)','Return Rate %','ERP Profit','ERP M%','Bills','Customers','Products_Sold','Avg Bill']
     if is_admin: sal['Act M%']=(sal['Act_P']/sal['Revenue']*100).round(1); sal['Act Profit']=sal['Act_P'].apply(fmt_m); d+=['Act Profit','Act M%']
     st.dataframe(sal[d], hide_index=True, use_container_width=True)
+    # Totals row for salesman table
+    sal_tot = {c:'' for c in d}
+    sal_tot['Salesman']       = '📊 TOTAL'
+    sal_tot['Revenue (Rs)']   = fmt_m(sal['Revenue'].sum())
+    sal_tot['Net Rev (Rs)']   = fmt_m(sal['Net Revenue'].sum())
+    sal_tot['Return Rate %']  = round(sal['Ret_Val'].sum()/sal['Revenue'].sum()*100, 1) if sal['Revenue'].sum()>0 else 0
+    sal_tot['ERP Profit']     = fmt_m(sal['ERP_P'].sum())
+    sal_tot['ERP M%']         = round(sal['ERP_P'].sum()/sal['Revenue'].sum()*100, 1) if sal['Revenue'].sum()>0 else 0
+    sal_tot['Bills']          = sal['Bills'].sum()
+    sal_tot['Customers']      = sales_df['Account Name'].nunique()
+    sal_tot['Products_Sold']  = sales_df['Product No.'].nunique()
+    sal_tot['Avg Bill']       = round(sal['Revenue'].sum()/sal['Bills'].sum(), 0) if sal['Bills'].sum()>0 else 0
+    if is_admin:
+        sal_tot['Act M%']    = round(sal['Act_P'].sum()/sal['Revenue'].sum()*100, 1) if sal['Revenue'].sum()>0 else 0
+        sal_tot['Act Profit']= fmt_m(sal['Act_P'].sum())
+    sal_with_tot = pd.concat([sal[d], pd.DataFrame([sal_tot])], ignore_index=True)
+    st.dataframe(sal_with_tot, hide_index=True, use_container_width=True)
     st.divider()
     st.subheader("Monthly Salesman Trend")
     sm=sales_df.groupby(['Month','Salesman']).agg(Revenue=('SALE','sum')).reset_index().sort_values(['Month','Revenue'],ascending=[True,False])
@@ -1123,8 +1188,7 @@ elif page == "📊 Period Comparison":
         t[f'{pa_l} Rev'] = t['Rev_A'].apply(fmt_m)
         t[f'{pb_l} Rev'] = t['Rev_B'].apply(fmt_m)
         t['Change'] = t['Rev Δ'].apply(lambda x:("+"+fmt_m(x)) if x>0 else fmt_m(x))
-        t = t.sort_values('Rev_B', ascending=False)
-        return t[['Dir',col,f'{pa_l} Rev',f'{pb_l} Rev','Change','Rev Δ%','Sqm_A','Sqm_B']]
+        return t[['Dir',col,f'{pa_l} Rev',f'{pb_l} Rev','Change','Rev Δ%','Sqm_A','Sqm_B']].sort_values('Rev Δ',ascending=False)
     tab1,tab2,tab3,tab4,tab5 = st.tabs(["🏭 Brand","📂 Category","👤 Customer","📦 Product","📐 Size"])
     with tab1: st.dataframe(pc_table('Brand Name'),   hide_index=True, use_container_width=True)
     with tab2: st.dataframe(pc_table('Category'),     hide_index=True, use_container_width=True)
@@ -1136,8 +1200,40 @@ elif page == "📊 Period Comparison":
 elif page == "📦 Closing Stock":
     st.title("📦 Closing Stock Report")
     with st.expander("🔍 Filters", expanded=True):
-        flt = pi_filters(pi, "csr")
-    flt2 = flt[flt['Current Stock Sqm']>0].copy().sort_values('Stock Value PKR',ascending=False)
+        c1,c2 = st.columns(2)
+        with c1:
+            min_d = df['Date'].min().date(); max_d = df['Date'].max().date()
+            cs_date = st.date_input("📅 As of Date", value=max_d, min_value=min_d, max_value=max_d, key="csr_date")
+        with c2:
+            st.markdown(" ")
+            st.markdown(" ")
+            st.caption(f"Showing closing stock as of **{cs_date}**")
+
+        @st.cache_data(ttl=3600)
+        def closing_stock_snap(_df, _prod, as_of):
+            snap = _df[_df['Date']<=pd.Timestamp(as_of)].sort_values('Date').groupby('Product No.').last()[['Closing']].reset_index()
+            snap.columns = ['Product No.','Current Stock Sqm']
+            purch2 = _df[(_df['Date']<=pd.Timestamp(as_of))&(_df['Type'].isin(['P','O.S']))].copy()
+            wac2   = purch2.groupby('Product No.').apply(lambda x: (x['Sq.m']*x['Rate']).sum()/x['Sq.m'].sum() if x['Sq.m'].sum()>0 else 0).reset_index()
+            wac2.columns = ['Product No.','WAC Rate']
+            snap = snap.merge(wac2, on='Product No.', how='left').fillna(0)
+            snap['Stock Value PKR'] = snap['Current Stock Sqm'] * snap['WAC Rate']
+            snap = snap.merge(_prod[['Product No.','Brand Name','Category','Size','Company Name']], on='Product No.', how='left')
+            return snap
+
+        snap_flt = closing_stock_snap(df, prod, cs_date)
+
+        c1,c2,c3,c4 = st.columns(4)
+        with c1: br_f  = st.selectbox("Brand",    ['All']+sorted(snap_flt['Brand Name'].dropna().unique().tolist()),   key="csr_br")
+        with c2: co_f  = st.selectbox("Company",  ['All']+sorted(snap_flt['Company Name'].dropna().unique().tolist()), key="csr_co")
+        with c3: cat_f = st.selectbox("Category", ['All']+sorted(snap_flt['Category'].dropna().unique().tolist()),     key="csr_cat")
+        with c4: sz_f  = st.selectbox("Size",     ['All']+sorted(prod['Size'].dropna().unique().tolist()),             key="csr_sz")
+
+    flt2 = snap_flt[snap_flt['Current Stock Sqm']>0].copy().sort_values('Stock Value PKR',ascending=False)
+    if br_f  != 'All': flt2 = flt2[flt2['Brand Name']   == br_f]
+    if co_f  != 'All': flt2 = flt2[flt2['Company Name'] == co_f]
+    if cat_f != 'All': flt2 = flt2[flt2['Category']     == cat_f]
+    if sz_f  != 'All': flt2 = flt2[flt2['Size']         == sz_f]
     c1,c2,c3,c4 = st.columns(4)
     c1.metric("Products in Stock",  f"{len(flt2):,}")
     c2.metric("Total Stock Sqm",    f"{flt2['Current Stock Sqm'].sum():,.0f}")
@@ -1312,3 +1408,149 @@ elif page == "🏦 Assets Position":
     ]
     st.dataframe(pd.DataFrame(bs_rows), hide_index=True, use_container_width=True)
     st.download_button("📥 Download", pd.DataFrame(bs_rows).to_csv(index=False), "balance_sheet.csv")
+
+
+# ─────────────────────────────────────────────
+# PAGE — SALESMAN RATE ANALYSIS
+# ─────────────────────────────────────────────
+elif page == "📊 Salesman Rate Analysis":
+    if st.session_state['role'] not in ['admin','manager']: st.error("Access denied."); st.stop()
+    st.title("📊 Salesman Rate Analysis")
+    st.caption("Compare which salesman sells each product at highest/lowest rate — reveals negotiation performance")
+
+    with st.expander("🔍 Filters", expanded=True):
+        dff = global_filters(df, "sra")
+
+    sales_df = dff[dff['Type']=='S'].copy()
+
+    # WAC lookup
+    purch = df[df['Type'].isin(['P','O.S'])].copy()
+    wac = purch.groupby('Product No.').apply(
+        lambda x: (x['Sq.m']*x['Rate']).sum()/x['Sq.m'].sum() if x['Sq.m'].sum()>0 else 0
+    ).reset_index()
+    wac.columns = ['Product No.','WAC Rate']
+
+    tab1, tab2, tab3 = st.tabs(["📦 Product vs Salesman","🧑‍💼 Salesman Overall","🏆 Rate Leaders"])
+
+    with tab1:
+        st.subheader("Product-wise Rate Comparison Across Salesmen")
+        st.caption("Shows every product sold by 2+ salesmen — who sold higher?")
+
+        sal_prod = sales_df.groupby(['Product No.','Salesman']).agg(
+            Total_Value =('SALE',         'sum'),
+            Total_Sqm   =('Sq.m',         'sum'),
+            Bills       =('Bill No.',     'nunique'),
+            Customers   =('Account Name', 'nunique'),
+        ).reset_index()
+        sal_prod = sal_prod[sal_prod['Total_Sqm']>0]
+        sal_prod['Avg Rate'] = (sal_prod['Total_Value'] / sal_prod['Total_Sqm']).round(0)
+        sal_prod = sal_prod.merge(wac, on='Product No.', how='left')
+        sal_prod = sal_prod.merge(prod[['Product No.','Brand Name','Category','Size']], on='Product No.', how='left')
+        sal_prod['Rate vs WAC'] = (sal_prod['Avg Rate'] - sal_prod['WAC Rate']).round(0)
+        sal_prod['Margin%']     = (sal_prod['Rate vs WAC'] / sal_prod['WAC Rate'] * 100).round(1)
+
+        # Filter to products sold by 2+ salesmen
+        multi = sal_prod.groupby('Product No.')['Salesman'].nunique()
+        multi_prods = multi[multi>=2].index
+
+        c1,c2,c3 = st.columns(3)
+        with c1:
+            show_all = st.checkbox("Show all products (including single salesman)", value=False)
+        with c2:
+            min_sqm = st.number_input("Min Sqm Sold", value=0, step=10, key="sra_sqm")
+        with c3:
+            br_f = st.selectbox("Brand", ['All']+sorted(prod['Brand Name'].dropna().unique().tolist()), key="sra_br")
+
+        if not show_all:
+            disp_prod = sal_prod[sal_prod['Product No.'].isin(multi_prods)]
+        else:
+            disp_prod = sal_prod.copy()
+
+        if min_sqm > 0:   disp_prod = disp_prod[disp_prod['Total_Sqm']>=min_sqm]
+        if br_f != 'All': disp_prod = disp_prod[disp_prod['Brand Name']==br_f]
+
+        disp_prod = disp_prod.sort_values(['Product No.','Avg Rate'], ascending=[True,False])
+        disp_prod['Avg Rate']    = disp_prod['Avg Rate'].apply(lambda x: f"Rs {x:,.0f}")
+        disp_prod['WAC Rate']    = disp_prod['WAC Rate'].apply(lambda x: f"Rs {x:,.0f}")
+        disp_prod['Rate vs WAC'] = disp_prod['Rate vs WAC'].apply(lambda x: f"+Rs {x:,.0f}" if x>0 else f"Rs {x:,.0f}")
+
+        st.caption(f"Showing {len(disp_prod):,} rows — {disp_prod['Product No.'].nunique():,} products")
+        st.dataframe(disp_prod[['Product No.','Brand Name','Size','Salesman','Total_Sqm','Bills','Customers','Avg Rate','WAC Rate','Rate vs WAC','Margin%']],
+                     hide_index=True, use_container_width=True)
+        st.download_button("📥 Download", disp_prod.to_csv(index=False), "salesman_rates.csv")
+
+    with tab2:
+        st.subheader("Overall Salesman Avg Selling Rate")
+        st.caption("Higher avg rate = sells premium products or negotiates better prices")
+
+        sal_overall = sales_df.groupby('Salesman').agg(
+            Total_Value  =('SALE',          'sum'),
+            Total_Sqm    =('Sq.m',          'sum'),
+            Total_Ret    =('RETURN',         'sum'),
+            Bills        =('Bill No.',       'nunique'),
+            Customers    =('Account Name',   'nunique'),
+            Products     =('Product No.',    'nunique'),
+        ).reset_index()
+        sal_overall = sal_overall[sal_overall['Total_Sqm']>0]
+        sal_overall['Avg Rate']      = (sal_overall['Total_Value'] / sal_overall['Total_Sqm']).round(0)
+        sal_overall['Net Revenue']   = sal_overall['Total_Value'] - sal_overall['Total_Ret']
+        sal_overall['Revenue']       = sal_overall['Total_Value'].apply(fmt_m)
+        sal_overall['Net Rev']       = sal_overall['Net Revenue'].apply(fmt_m)
+        sal_overall['Avg Bill Val']  = (sal_overall['Total_Value'] / sal_overall['Bills']).round(0)
+        sal_overall = sal_overall.sort_values('Avg Rate', ascending=False)
+
+        # Totals row
+        totals = pd.DataFrame([{
+            'Salesman'   : '📊 TOTAL',
+            'Total_Value': sal_overall['Total_Value'].sum(),
+            'Total_Sqm'  : sal_overall['Total_Sqm'].sum(),
+            'Bills'      : sal_overall['Bills'].sum(),
+            'Customers'  : sales_df['Account Name'].nunique(),
+            'Products'   : sales_df['Product No.'].nunique(),
+            'Avg Rate'   : (sal_overall['Total_Value'].sum()/sal_overall['Total_Sqm'].sum()),
+            'Net Revenue': sal_overall['Net Revenue'].sum(),
+            'Revenue'    : fmt_m(sal_overall['Total_Value'].sum()),
+            'Net Rev'    : fmt_m(sal_overall['Net Revenue'].sum()),
+            'Avg Bill Val': (sal_overall['Total_Value'].sum()/sal_overall['Bills'].sum()),
+        }])
+        display = pd.concat([sal_overall, totals], ignore_index=True)
+        display['Avg Rate']     = display['Avg Rate'].apply(lambda x: f"Rs {x:,.0f}")
+        display['Avg Bill Val'] = display['Avg Bill Val'].apply(lambda x: f"Rs {x:,.0f}")
+
+        st.dataframe(display[['Salesman','Revenue','Net Rev','Total_Sqm','Bills','Customers','Products','Avg Rate','Avg Bill Val']],
+                     hide_index=True, use_container_width=True)
+
+    with tab3:
+        st.subheader("🏆 Rate Leaders — Who Sells Each Product Highest?")
+        st.caption("For each product sold by multiple salesmen — who consistently gets the best rate?")
+
+        sal_prod2 = sales_df.groupby(['Product No.','Salesman']).agg(
+            Total_Value=('SALE','sum'), Total_Sqm=('Sq.m','sum'), Bills=('Bill No.','nunique')
+        ).reset_index()
+        sal_prod2 = sal_prod2[sal_prod2['Total_Sqm']>0]
+        sal_prod2['Avg Rate'] = (sal_prod2['Total_Value']/sal_prod2['Total_Sqm']).round(0)
+
+        multi2 = sal_prod2.groupby('Product No.')['Salesman'].nunique()
+        multi_prods2 = multi2[multi2>=2].index
+        sal_prod2 = sal_prod2[sal_prod2['Product No.'].isin(multi_prods2)]
+
+        # Best rate per product
+        best  = sal_prod2.loc[sal_prod2.groupby('Product No.')['Avg Rate'].idxmax()][['Product No.','Salesman','Avg Rate']].rename(columns={'Salesman':'Best Rate By','Avg Rate':'Best Rate'})
+        worst = sal_prod2.loc[sal_prod2.groupby('Product No.')['Avg Rate'].idxmin()][['Product No.','Salesman','Avg Rate']].rename(columns={'Salesman':'Lowest Rate By','Avg Rate':'Lowest Rate'})
+
+        leaders = best.merge(worst, on='Product No.', how='left')
+        leaders = leaders.merge(prod[['Product No.','Brand Name','Category','Size']], on='Product No.', how='left')
+        leaders['Rate Diff'] = leaders['Best Rate'] - leaders['Lowest Rate']
+        leaders = leaders[leaders['Rate Diff']>0].sort_values('Rate Diff', ascending=False)
+        leaders['Best Rate']    = leaders['Best Rate'].apply(lambda x: f"Rs {x:,.0f}")
+        leaders['Lowest Rate']  = leaders['Lowest Rate'].apply(lambda x: f"Rs {x:,.0f}")
+        leaders['Rate Diff']    = leaders['Rate Diff'].apply(lambda x: f"Rs {x:,.0f}")
+
+        st.caption(f"Showing {len(leaders):,} products with rate differences")
+        st.dataframe(leaders[['Product No.','Brand Name','Category','Size','Best Rate By','Best Rate','Lowest Rate By','Lowest Rate','Rate Diff']],
+                     hide_index=True, use_container_width=True)
+
+        st.divider()
+        st.subheader("🏅 Leaderboard — Most Products with Best Rate")
+        board = sal_prod2.loc[sal_prod2.groupby('Product No.')['Avg Rate'].idxmax()].groupby('Salesman').size().reset_index(name='Products with Best Rate').sort_values('Products with Best Rate', ascending=False)
+        st.dataframe(board, hide_index=True, use_container_width=True)
