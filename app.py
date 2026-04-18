@@ -437,11 +437,83 @@ if page == "📊 Overview":
     h = pi.groupby('Stock Health').agg(Products=('Product No.','count'),Value=('Stock Value PKR','sum'),Sqm=('Current Stock Sqm','sum')).reset_index().sort_values('Value',ascending=False)
     h['Stock Value']=h['Value'].apply(fmt_m); h['Sqm']=h['Sqm'].apply(lambda x:f"{x:,.0f}")
     st.dataframe(h[['Stock Health','Products','Stock Value','Sqm']], hide_index=True, use_container_width=True)
+    st.divider()
+    st.subheader("🔎 Drill Down — View Products by Status")
+    col1, col2, col3 = st.columns(3)
+    with col1:
+        inv_drill = st.selectbox("Inventory Status", ['— select —'] + sorted(pi['Inventory Status'].dropna().unique().tolist()), key="ov_inv_drill")
+    with col2:
+        sh_drill  = st.selectbox("Stock Health",     ['— select —'] + sorted(pi['Stock Health'].dropna().unique().tolist()),     key="ov_sh_drill")
+    with col3:
+        dp_drill  = st.selectbox("Demand Pattern",   ['— select —'] + sorted(pi['Demand Pattern'].dropna().unique().tolist()),   key="ov_dp_drill")
+    drill = pi.copy()
+    if inv_drill != '— select —': drill = drill[drill['Inventory Status'] == inv_drill]
+    if sh_drill  != '— select —': drill = drill[drill['Stock Health']     == sh_drill]
+    if dp_drill  != '— select —': drill = drill[drill['Demand Pattern']   == dp_drill]
+    if any(x != '— select —' for x in [inv_drill, sh_drill, dp_drill]):
+        drill = drill[drill['Current Stock Sqm'] > 0].sort_values('Stock Value PKR', ascending=False)
+        st.caption(f"Showing **{len(drill):,} products** — **{fmt_m(drill['Stock Value PKR'].sum())}** stock value")
+        disp_cols = ['Product No.','Brand Name','Category','Size','Current Stock Sqm','WAC Rate','Stock Value PKR','Days Since Last Sale','Sales Velocity/Month','Inventory Status','Stock Health','Demand Pattern','Reorder Score']
+        st.dataframe(drill[disp_cols], hide_index=True, use_container_width=True)
+        st.download_button("📥 Download", drill[disp_cols].to_csv(index=False), "drilldown.csv", "text/csv")
+    st.divider()
+    with st.expander("📖 Classification Thresholds Reference", expanded=False):
+        c1, c2 = st.columns(2)
+        with c1:
+            st.markdown("**📦 Inventory Status** — based on days since last sale")
+            st.markdown("""
+| Status | Condition |
+|--------|-----------|
+| 🟢 Active | Last sale ≤ 30 days ago |
+| 🟡 Slow | Last sale 31–90 days ago |
+| 🟠 At Risk | Last sale 91–180 days ago |
+| 🔴 Critical | Last sale 181–360 days ago |
+| ⚫ Dead Stock | Last sale > 360 days ago |
+| ⬜ Out of Stock | Closing stock ≤ 0 |
+| ❔ No Sales | Never sold |
+""")
+        with c2:
+            st.markdown("**🏥 Stock Health** — based on months of stock remaining")
+            st.markdown("""
+| Health | Condition |
+|--------|-----------|
+| 🚨 Reorder Now | Stock covers ≤ 1 month |
+| ✅ Healthy | Stock covers 1–3 months |
+| 📦 Overstocked | Stock covers 3–6 months |
+| ⚫ Dead Stock | Stock covers > 6 months |
+| ⬜ No Stock | Closing ≤ 0 |
+""")
+            st.markdown("**📊 Demand Pattern**")
+            st.markdown("""
+| Pattern | Condition |
+|---------|-----------|
+| 🔥 Stable Fast Mover | Freq ≥ 0.15/day, CV < 3 |
+| ⚡ Volatile Fast Mover | Freq ≥ 0.15/day, CV ≥ 3 |
+| 🐢 Slow Stable | Freq 0.05–0.15/day, CV < 3 |
+| 〰️ Erratic Demand | Freq 0.05–0.15/day, CV ≥ 3 |
+| 💀 Dead / Negligible | Freq < 0.05/day |
+""")
 
 elif page == "📈 Sales Trends":
     st.title("📈 Sales Trends")
     with st.expander("🔍 Filters", expanded=True):
         dff = global_filters(df, "st")
+        # Stock Health / Inventory Status / Demand Pattern filters (from pi)
+        c1, c2, c3 = st.columns(3)
+        with c1:
+            sh_f  = st.selectbox("Stock Health",     ['All']+sorted(pi['Stock Health'].dropna().unique().tolist()),     key="st_sh")
+        with c2:
+            inv_f = st.selectbox("Inventory Status", ['All']+sorted(pi['Inventory Status'].dropna().unique().tolist()), key="st_inv")
+        with c3:
+            dp_f  = st.selectbox("Demand Pattern",   ['All']+sorted(pi['Demand Pattern'].dropna().unique().tolist()),   key="st_dp")
+        # Apply pi filters by restricting products
+        pi_flt = pi.copy()
+        if sh_f  != 'All': pi_flt = pi_flt[pi_flt['Stock Health']     == sh_f]
+        if inv_f != 'All': pi_flt = pi_flt[pi_flt['Inventory Status'] == inv_f]
+        if dp_f  != 'All': pi_flt = pi_flt[pi_flt['Demand Pattern']   == dp_f]
+        allowed_prods = pi_flt['Product No.'].tolist()
+        if any(x != 'All' for x in [sh_f, inv_f, dp_f]):
+            dff = dff[dff['Product No.'].isin(allowed_prods)]
     sales_df   = dff[dff['Type']=='S'].copy()
     returns_df = dff[dff['Type']=='S.R'].copy()
     c1,c2,c3,c4 = st.columns(4)
@@ -490,7 +562,9 @@ elif page == "📈 Sales Trends":
     pr['Net Value']=pr['Sale_Val']-pr['Ret_Val']; pr['ERP M%']=(pr['ERP_P']/pr['Sale_Val']*100).round(1)
     pr['Sale Value']=pr['Sale_Val'].apply(fmt_m); pr['Ret Value']=pr['Ret_Val'].apply(fmt_m)
     pr['Net']=pr['Net Value'].apply(fmt_m); pr['ERP Profit']=pr['ERP_P'].apply(fmt_m)
-    disp2=['Product No.','Brand Name','Category','Size','Sale Value','Sale_Sqm','Ret Value','Net','Bills','ERP Profit','ERP M%']
+    # Merge pi columns into product table
+    pr = pr.merge(pi[['Product No.','Stock Health','Inventory Status','Demand Pattern','Current Stock Sqm','Sales Velocity/Month']], on='Product No.', how='left')
+    disp2=['Product No.','Brand Name','Category','Size','Sale Value','Sale_Sqm','Ret Value','Net','Bills','ERP Profit','ERP M%','Stock Health','Inventory Status','Demand Pattern','Current Stock Sqm','Sales Velocity/Month']
     if is_admin:
         pr['Actual M%']=(pr['Act_P']/pr['Sale_Val']*100).round(1); pr['Actual Profit']=pr['Act_P'].apply(fmt_m); disp2+=['Actual Profit','Actual M%']
     st.dataframe(pr[disp2], hide_index=True, use_container_width=True)
@@ -1010,6 +1084,49 @@ elif page == "🔍 Search":
                 st.dataframe(tx[['Date2','Type','Product No.','Account Name','Salesman','Sq.m','Rate','SALE','RETURN','Warehouse']], hide_index=True, use_container_width=True)
     else:
         st.info("Type at least 2 characters to search")
+
+    # ── Transaction Debugger ──────────────────────────────
+    st.divider()
+    with st.expander("🔬 Transaction Debugger — verify stock for any product", expanded=False):
+        st.caption("Shows every transaction in date order with ERP closing stock — useful when numbers look wrong")
+        dbg_q = st.text_input("Product No. (exact or partial)", key="dbg_prod")
+        if dbg_q and len(dbg_q) >= 3:
+            dbg_matches = df[df['Product No.'].str.upper().str.contains(dbg_q.upper(), na=False)]['Product No.'].unique()
+            if len(dbg_matches) == 0:
+                st.warning("No product found")
+            elif len(dbg_matches) > 1:
+                dbg_sel = st.selectbox("Multiple matches — select one:", dbg_matches, key="dbg_sel")
+            else:
+                dbg_sel = dbg_matches[0]
+            if len(dbg_matches) >= 1:
+                if len(dbg_matches) > 1:
+                    dbg_df = df[df['Product No.'] == dbg_sel].copy()
+                else:
+                    dbg_df = df[df['Product No.'] == dbg_matches[0]].copy()
+                dbg_df = dbg_df.sort_values('Date').reset_index(drop=True)
+                dbg_df['Date_Fmt'] = dbg_df['Date'].dt.strftime('%d-%m-%Y %H:%M')
+                # Running stock from transactions (for comparison)
+                dbg_df['Stock Δ'] = 0.0
+                dbg_df.loc[dbg_df['Type'].isin(['P','O.S']), 'Stock Δ'] = dbg_df['Sq.m']
+                dbg_df.loc[dbg_df['Type'].isin(['S']), 'Stock Δ'] = -dbg_df['Sq.m']
+                dbg_df.loc[dbg_df['Type'] == 'S.R', 'Stock Δ'] = dbg_df['Sq.m']
+                dbg_df.loc[dbg_df['Type'] == 'P.R', 'Stock Δ'] = -dbg_df['Sq.m']
+                dbg_df.loc[dbg_df['Type'] == 'D.P', 'Stock Δ'] = 0.0
+                dbg_df['Calc Stock'] = dbg_df['Stock Δ'].cumsum().round(3)
+                dbg_df['Match'] = (abs(dbg_df['Calc Stock'] - dbg_df['Closing']) < 0.1).map({True:'✅', False:'⚠️'})
+                # Summary
+                last = dbg_df.iloc[-1]
+                c1,c2,c3,c4 = st.columns(4)
+                c1.metric("Transactions", len(dbg_df))
+                c2.metric("ERP Closing", f"{last['Closing']:,.3f} sqm")
+                c3.metric("Calc Closing", f"{last['Calc Stock']:,.3f} sqm")
+                mismatches = (dbg_df['Match']=='⚠️').sum()
+                c4.metric("Mismatches", mismatches, delta="⚠️ check rows" if mismatches>0 else "clean", delta_color="inverse" if mismatches>0 else "normal")
+                st.dataframe(
+                    dbg_df[['Date_Fmt','Type','Invoice No.','Sq.m','Rate','Stock Δ','Calc Stock','Closing','Match']],
+                    hide_index=True, use_container_width=True
+                )
+                st.download_button("📥 Download Debug", dbg_df.to_csv(index=False), f"debug_{dbg_matches[0] if len(dbg_matches)==1 else dbg_sel}.csv")
 
 elif page == "📊 Period Comparison":
     st.title("📊 Period Comparison")
