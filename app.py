@@ -137,14 +137,15 @@ df.loc[sale_rows, 'Actual Profit'] = (
     # SORT TRANSACTIONS
     # ----------------------------
 
-    sort_cols = ["Product No.","Date"]
+    sort_cols = ["Product No.", "Date"]
 
     if "Invoice No." in df.columns:
-
         sort_cols.append("Invoice No.")
 
-    df = df.sort_values(sort_cols, kind="mergesort").reset_index(drop=True)
-
+    df = df.sort_values(
+        by=sort_cols,
+        kind="mergesort"
+    ).reset_index(drop=True)
 
     # ----------------------------
     # DATE DIMENSIONS
