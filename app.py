@@ -164,22 +164,21 @@ def load_data():
     df["WAC Rate"] = df["WAC Rate"].fillna(0)
 
     # ----------------------------
-    # ACTUAL PROFIT
-    # ----------------------------
+# ACTUAL PROFIT
+# ----------------------------
 
-    df["Actual Profit"] = 0
+df["Actual Profit"] = 0.0
 
-    sale_rows = df["Type"] == "S"
+df["SALE"] = pd.to_numeric(df["SALE"], errors="coerce").fillna(0)
+df["Sq.m"] = pd.to_numeric(df["Sq.m"], errors="coerce").fillna(0)
+df["WAC Rate"] = pd.to_numeric(df["WAC Rate"], errors="coerce").fillna(0)
 
-    df.loc[sale_rows,"Actual Profit"] = (
-        df.loc[sale_rows,"SALE"]
-        - df.loc[sale_rows,"Sq.m"] * df.loc[sale_rows,"WAC Rate"]
-    )
+sale_rows = df["Type"] == "S"
 
-    return df, prod
-
-
-df, prod = load_data()
+df.loc[sale_rows, "Actual Profit"] = (
+    df.loc[sale_rows, "SALE"]
+    - df.loc[sale_rows, "Sq.m"] * df.loc[sale_rows, "WAC Rate"]
+)
 
 # ----------------------------
 # INVENTORY DEBUGGER
