@@ -6,23 +6,19 @@ import requests
 from google.oauth2 import service_account
 import google.auth.transport.requests
 
-
 st.set_page_config(page_title="MiTiles Dashboard", layout="wide")
-
 
 # ----------------------------
 # PRODUCT CLEANING
 # ----------------------------
 
 def clean_product(x):
-
     return (
         str(x)
-        .replace('\xa0',' ')
-        .replace('  ',' ')
+        .replace('\xa0', ' ')
+        .replace('  ', ' ')
         .strip()
     )
-
 
 # ----------------------------
 # LOAD DATA
@@ -56,25 +52,19 @@ def load_data():
     df = pd.read_excel(buffer, sheet_name="SALE HISTORY")
 
     buffer.seek(0)
-
     prod = pd.read_excel(buffer, sheet_name="PRODUCT DATA")
-
 
     # ----------------------------
     # DATE CLEANING
     # ----------------------------
 
     df["Date"] = pd.to_datetime(
-        df["Date"]
-        .astype(str)
-        .str.replace("\xa0"," ")
-        .str.strip(),
+        df["Date"].astype(str).str.replace("\xa0", " ").str.strip(),
         errors="coerce",
         dayfirst=True
     )
 
     df = df[df["Date"].notna()]
-
 
     # ----------------------------
     # PRODUCT NORMALIZATION
@@ -83,55 +73,28 @@ def load_data():
     df["Product No."] = df["Product No."].apply(clean_product)
     prod["Product No."] = prod["Product No."].apply(clean_product)
 
-
     # ----------------------------
     # REMOVE NON-STOCK TYPES
     # ----------------------------
 
     valid_types = ["P","S","S.R","P.R","O.S"]
-
     df = df[df["Type"].isin(valid_types)]
-
 
     # ----------------------------
     # NUMERIC CLEANING
     # ----------------------------
 
     numeric_cols = [
-        "Sq.m",
-        "Rate",
-        "Closing",
-        "Profit",
-        "SALE",
-        "RETURN",
-        "GROSS PROFIT",
-        "NET SALE"
+        "Sq.m","Rate","Closing","Profit",
+        "SALE","RETURN","GROSS PROFIT","NET SALE"
     ]
 
     for col in numeric_cols:
-
         if col in df.columns:
-
             df[col] = pd.to_numeric(
-                df[col]
-                .astype(str)
-                .str.replace(",",""),
+                df[col].astype(str).str.replace(",",""),
                 errors="coerce"
             ).fillna(0)
-# ----------------------------
-# CREATE ACTUAL PROFIT
-# ----------------------------
-
-if 'Actual Profit' not in df.columns:
-
-    df['Actual Profit'] = 0
-
-sale_rows = df['Type'] == 'S'
-
-df.loc[sale_rows, 'Actual Profit'] = (
-    df.loc[sale_rows, 'SALE']
-    - df.loc[sale_rows, 'Sq.m'] * df.loc[sale_rows, 'WAC Rate']
-)
 
     # ----------------------------
     # SORT TRANSACTIONS
@@ -142,10 +105,7 @@ df.loc[sale_rows, 'Actual Profit'] = (
     if "Invoice No." in df.columns:
         sort_cols.append("Invoice No.")
 
-    df = df.sort_values(
-        by=sort_cols,
-        kind="mergesort"
-    ).reset_index(drop=True)
+    df = df.sort_values(sort_cols, kind="mergesort").reset_index(drop=True)
 
     # ----------------------------
     # DATE DIMENSIONS
@@ -155,20 +115,15 @@ df.loc[sale_rows, 'Actual Profit'] = (
     df["Month"] = df["Date"].dt.to_period("M").astype(str)
     df["Year"] = df["Date"].dt.year
 
-
     # ----------------------------
     # FIX SALES VALUE
     # ----------------------------
 
-    sale_mask = (df["SALE"]==0) & (df["Type"]=="S")
-
+    sale_mask = (df["SALE"] == 0) & (df["Type"] == "S")
     df.loc[sale_mask,"SALE"] = df.loc[sale_mask,"Sq.m"] * df.loc[sale_mask,"Rate"]
 
-
-    ret_mask = (df["RETURN"]==0) & (df["Type"]=="S.R")
-
+    ret_mask = (df["RETURN"] == 0) & (df["Type"] == "S.R")
     df.loc[ret_mask,"RETURN"] = df.loc[ret_mask,"Sq.m"] * df.loc[ret_mask,"Rate"]
-
 
     # ----------------------------
     # MERGE PRODUCT MASTER
@@ -190,30 +145,41 @@ df.loc[sale_rows, 'Actual Profit'] = (
         how="left"
     )
 
-
     # ----------------------------
     # WAC CALCULATION
     # ----------------------------
 
-    purch = df[df["Type"].isin(["P","O.S"])].copy()
+    purch = df[df["Type"].isin(["P","O.S"])]
 
-    wac = purch.groupby("Product No.").apply(
-        lambda x:
-        (x["Sq.m"]*x["Rate"]).sum()/x["Sq.m"].sum()
-        if x["Sq.m"].sum()>0 else 0
-    ).reset_index()
+    wac = (
+        purch.assign(value=purch["Sq.m"] * purch["Rate"])
+        .groupby("Product No.", as_index=False)
+        .agg({"value":"sum","Sq.m":"sum"})
+    )
 
-    wac.columns=["Product No.","WAC Rate"]
+    wac["WAC Rate"] = wac["value"] / wac["Sq.m"]
+    wac = wac[["Product No.","WAC Rate"]]
 
-    df = df.merge(wac,on="Product No.",how="left")
-
+    df = df.merge(wac, on="Product No.", how="left")
     df["WAC Rate"] = df["WAC Rate"].fillna(0)
 
-    return df,prod
+    # ----------------------------
+    # ACTUAL PROFIT
+    # ----------------------------
+
+    df["Actual Profit"] = 0
+
+    sale_rows = df["Type"] == "S"
+
+    df.loc[sale_rows,"Actual Profit"] = (
+        df.loc[sale_rows,"SALE"]
+        - df.loc[sale_rows,"Sq.m"] * df.loc[sale_rows,"WAC Rate"]
+    )
+
+    return df, prod
 
 
-df,prod = load_data()
-
+df, prod = load_data()
 
 # ----------------------------
 # INVENTORY DEBUGGER
@@ -221,20 +187,19 @@ df,prod = load_data()
 
 def debug_inventory(df, product):
 
-    x = df[df["Product No."]==product].copy()
+    x = df[df["Product No."] == product].copy()
 
     x = x.sort_values(["Date","Invoice No."])
 
-    x["Change"]=0
+    x["Change"] = 0
 
-    x.loc[x["Type"].isin(["P","O.S"]),"Change"]=x["Sq.m"]
-    x.loc[x["Type"].isin(["S","P.R"]),"Change"]=-x["Sq.m"]
-    x.loc[x["Type"]=="S.R","Change"]=x["Sq.m"]
+    x.loc[x["Type"].isin(["P","O.S"]), "Change"] = x["Sq.m"]
+    x.loc[x["Type"].isin(["S","P.R"]), "Change"] = -x["Sq.m"]
+    x.loc[x["Type"] == "S.R", "Change"] = x["Sq.m"]
 
-    x["Running Stock"]=x["Change"].cumsum()
+    x["Running Stock"] = x["Change"].cumsum()
 
     return x
-
 
 # ----------------------------
 # STOCK MISMATCH DETECTOR
@@ -242,14 +207,13 @@ def debug_inventory(df, product):
 
 def detect_mismatch(df, product):
 
-    t = debug_inventory(df,product)
+    t = debug_inventory(df, product)
 
     t["Difference"] = t["Running Stock"] - t["Closing"]
 
-    bad = t[t["Difference"].abs()>0.01]
+    bad = t[t["Difference"].abs() > 0.01]
 
-    return t,bad
-
+    return t, bad
 
 # ----------------------------
 # INTEGRITY SCANNER
@@ -257,28 +221,29 @@ def detect_mismatch(df, product):
 
 def inventory_scan(df):
 
-    problems=[]
+    problems = []
 
-    for p,g in df.groupby("Product No."):
+    for p, g in df.groupby("Product No."):
 
-        g=g.sort_values(["Date","Invoice No."])
+        g = g.sort_values(["Date","Invoice No."])
 
-        change=np.where(g["Type"].isin(["P","O.S"]),g["Sq.m"],
-               np.where(g["Type"].isin(["S","P.R"]),-g["Sq.m"],
-               np.where(g["Type"]=="S.R",g["Sq.m"],0)))
+        change = np.where(
+            g["Type"].isin(["P","O.S"]), g["Sq.m"],
+            np.where(
+                g["Type"].isin(["S","P.R"]), -g["Sq.m"],
+                np.where(g["Type"] == "S.R", g["Sq.m"], 0)
+            )
+        )
 
-        calc=change.cumsum()
+        calc = change.cumsum()
 
-        if (calc<0).any():
-
+        if (calc < 0).any():
             problems.append([p,"Negative Stock"])
 
-        if abs(calc.iloc[-1]-g["Closing"].iloc[-1])>0.01:
-
+        if abs(calc.iloc[-1] - g["Closing"].iloc[-1]) > 0.01:
             problems.append([p,"Closing mismatch"])
 
-    return pd.DataFrame(problems,columns=["Product","Issue"])
-
+    return pd.DataFrame(problems, columns=["Product","Issue"])
 
 # ----------------------------
 # DASHBOARD
@@ -286,14 +251,11 @@ def inventory_scan(df):
 
 st.title("MiTiles Inventory Dashboard")
 
-st.subheader("Dataset Overview")
+col1, col2, col3 = st.columns(3)
 
-col1,col2,col3 = st.columns(3)
-
-col1.metric("Transactions",len(df))
-col2.metric("Products",df["Product No."].nunique())
-col3.metric("Total Stock",round(df["Closing"].iloc[-1],2))
-
+col1.metric("Transactions", len(df))
+col2.metric("Products", df["Product No."].nunique())
+col3.metric("Total Stock", round(df["Closing"].iloc[-1],2))
 
 # ----------------------------
 # DEBUG PANEL
@@ -301,20 +263,17 @@ col3.metric("Total Stock",round(df["Closing"].iloc[-1],2))
 
 st.sidebar.header("Debug Tools")
 
-product = st.sidebar.text_input(
-    "Product No",
-    "OCM6600051"
-)
+product = st.sidebar.text_input("Product No", "OCM6600051")
 
 if product:
 
-    table,bad = detect_mismatch(df,product)
+    table, bad = detect_mismatch(df, product)
 
     st.subheader(f"Inventory Timeline: {product}")
 
     st.dataframe(table)
 
-    if len(bad)>0:
+    if len(bad) > 0:
 
         st.error("Stock mismatch detected")
 
@@ -323,7 +282,6 @@ if product:
     else:
 
         st.success("ERP closing matches calculated stock")
-
 
 # ----------------------------
 # INTEGRITY SCAN
