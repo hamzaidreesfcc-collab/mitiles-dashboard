@@ -99,13 +99,24 @@ is_admin = st.session_state['role'] == 'admin'
 # ─────────────────────────────────────────────
 def _parse_date(val):
     s = str(val).strip()
+    # Format 1: original ERP triple-space format
     try:
         return pd.to_datetime(s, format='%d-%m-%Y   %I:%M %p')
     except:
-        try:
-            return pd.Timestamp('1899-12-30') + pd.Timedelta(days=float(s))
-        except:
-            return pd.NaT
+        pass
+    # Format 2: new single-space lowercase am/pm format
+    try:
+        return pd.to_datetime(s, format='%d-%m-%Y %I:%M %p')
+    except:
+        pass
+    # Format 3: Excel serial — Google Sheets read DD-MM as MM-DD, swap back
+    try:
+        f = float(s)
+        dt = pd.Timestamp('1899-12-30') + pd.Timedelta(days=f)
+        dt_fixed = dt.replace(month=dt.day, day=dt.month)
+        return dt_fixed
+    except:
+        return pd.NaT
 
 def _clean_prod(x):
     x = str(x).replace('\xa0', ' ')
