@@ -118,7 +118,20 @@ def load_data():
                 .str.replace(",",""),
                 errors="coerce"
             ).fillna(0)
+# ----------------------------
+# CREATE ACTUAL PROFIT
+# ----------------------------
 
+if 'Actual Profit' not in df.columns:
+
+    df['Actual Profit'] = 0
+
+sale_rows = df['Type'] == 'S'
+
+df.loc[sale_rows, 'Actual Profit'] = (
+    df.loc[sale_rows, 'SALE']
+    - df.loc[sale_rows, 'Sq.m'] * df.loc[sale_rows, 'WAC Rate']
+)
 
     # ----------------------------
     # SORT TRANSACTIONS
