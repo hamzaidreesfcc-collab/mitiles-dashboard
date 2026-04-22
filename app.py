@@ -452,6 +452,8 @@ with st.sidebar:
         "📊 Salesman Rate Analysis",
         "🤖 ML Model Health",
         "🎨 Design Brief Tool",
+        "🔍 Product Audit",
+        "💡 Investment Advisor",
     ], label_visibility="collapsed")
     st.divider()
     if st.button("🔄 Refresh Data"): st.cache_data.clear(); st.rerun()
@@ -462,6 +464,45 @@ with st.sidebar:
 # ─────────────────────────────────────────────
 def fmt_m(v): return f"Rs {v/1e6:.2f}M"
 def fmt_k(v): return f"Rs {v/1e3:.1f}K"
+
+def ai_insights_button(data_summary: str, page_context: str, key: str):
+    """Renders an AI Insights button. On click, calls Claude with filtered data summary."""
+    if st.button("🤖 Generate AI Insights", key=f"ai_{key}", help="Analyse current data and get actionable recommendations"):
+        with st.spinner("Analysing data..."):
+            try:
+                from anthropic import Anthropic
+                client = Anthropic(api_key=st.secrets.get("ANTHROPIC_API_KEY",""))
+                prompt = f"""You are a senior business analyst for Mi-Tiles, a tile and sanitary showroom on Ferozepur Road, Lahore, Pakistan.
+
+PAGE: {page_context}
+
+CURRENT FILTERED DATA:
+{data_summary}
+
+Generate exactly 5 insights. Each must be:
+1. Specific to the numbers shown — no generic advice
+2. Actionable — tell exactly what to do
+3. Prioritised — most important first
+
+Format each insight as:
+🔴/🟡/🟢 [PRIORITY] **[Title]**: [2-3 sentence insight with specific numbers and action]
+
+Use 🔴 for urgent, 🟡 for important, 🟢 for opportunity."""
+
+                response = client.messages.create(
+                    model="claude-sonnet-4-6",
+                    max_tokens=1500,
+                    messages=[{"role":"user","content":prompt}]
+                )
+                insights = response.content[0].text
+                cost = (response.usage.input_tokens*3 + response.usage.output_tokens*15)/1_000_000
+                with st.expander("🤖 AI Insights", expanded=True):
+                    st.markdown(insights)
+                    st.caption(f"~Rs {cost*280:.1f} cost • {response.usage.input_tokens:,} tokens")
+            except Exception as e:
+                st.error(f"AI Insights error: {e}")
+                if "api_key" in str(e).lower():
+                    st.info("Add ANTHROPIC_API_KEY to Streamlit Cloud → Settings → Secrets")
 
 def global_filters(df, key_prefix, show_date=True, show_salesman=True, show_warehouse=True, show_inventory=False):
     dff = df.copy()
@@ -576,6 +617,20 @@ if page == "📊 Overview":
         disp_cols = ['Product No.','Brand Name','Category','Size','Current Stock Sqm','WAC Rate','Stock Value PKR','Days Since Last Sale','Sales Velocity/Month','Inventory Status','Stock Health','Demand Pattern','Reorder Score']
         st.dataframe(drill[disp_cols], hide_index=True, use_container_width=True)
         st.download_button("📥 Download", drill[disp_cols].to_csv(index=False), "drilldown.csv", "text/csv")
+    st.divider()
+    ov_summary = f"""
+Total Stock Value: {fmt_m(pi['Stock Value PKR'].sum())}
+Total Stock Sqm: {pi[pi['Current Stock Sqm']>0]['Current Stock Sqm'].sum():,.0f}
+Active Products: {(pi['Inventory Status']=='Active').sum()}
+Dead Stock Products: {(pi['Inventory Status']=='Dead Stock').sum()}, Value: {fmt_m(pi[pi['Inventory Status']=='Dead Stock']['Stock Value PKR'].sum())}
+Reorder Now: {(pi['Stock Health']=='Reorder Now').sum()} products
+Filtered Revenue: {fmt_m(sales_df['SALE'].sum())}
+Filtered Transactions: {len(sales_df):,}
+Unique Customers: {sales_df['Account Name'].nunique()}
+Top Brand by Stock Value: {pi.groupby('Brand Name')['Stock Value PKR'].sum().idxmax()}
+High ML Risk Products: {(pi['Risk Label']=='🔴 High').sum() if 'Risk Label' in pi.columns else 'N/A'}
+"""
+    ai_insights_button(ov_summary, "Inventory Overview Dashboard", "overview")
     st.divider()
     with st.expander("📖 Classification Thresholds Reference", expanded=False):
         c1, c2 = st.columns(2)
@@ -728,6 +783,20 @@ elif page == "🔴 Dead Stock":
     st.caption(f"Showing {len(dead):,} products — {fmt_m(dead['Stock Value PKR'].sum())}")
     st.dataframe(dead[cols], hide_index=True, use_container_width=True)
     st.download_button("📥 Download", dead[cols].to_csv(index=False), "dead_stock.csv", "text/csv")
+    st.divider()
+    ds_summary = f"""
+Dead Stock Products: {len(dead)}
+Total Dead Stock Value: {fmt_m(dead['Stock Value PKR'].sum())}
+Total Dead Stock Sqm: {dead['Current Stock Sqm'].sum():,.0f}
+Avg Days Since Last Sale: {dead['Days Since Last Sale'].mean():.0f} days
+Top Dead Brand: {dead.groupby('Brand Name')['Stock Value PKR'].sum().idxmax() if len(dead)>0 else 'N/A'}
+Top Dead Category: {dead.groupby('Category')['Stock Value PKR'].sum().idxmax() if 'Category' in dead.columns and len(dead)>0 else 'N/A'}
+Avg Suggested Discount: {dead['Suggested Discount %'].mean():.0f}%
+Total Potential Recovery at Liquidation: {fmt_m((dead['Current Stock Sqm']*dead['Liquidation Price']).sum())}
+Products dead >2 years: {(dead['Days Since Last Sale']>730).sum()}
+Products dead 1-2 years: {((dead['Days Since Last Sale']>365)&(dead['Days Since Last Sale']<=730)).sum()}
+"""
+    ai_insights_button(ds_summary, "Dead Stock Analysis Page", "deadstock")
     st.divider()
     st.subheader("🤖 ML Early Warning — Products Heading to Dead Stock")
     st.caption("These products are NOT yet dead stock but the model gives them ≥70% probability of becoming dead within the next few months")
@@ -899,6 +968,17 @@ elif page == "👤 Customer Intelligence":
         if is_admin: top['Act M%']=(top['Act_P']/top['Rev']*100).round(1); top['Act Profit']=top['Act_P'].apply(fmt_m); d+=['Act Profit','Act M%']
         st.dataframe(top[d], hide_index=True, use_container_width=True)
         st.download_button("📥 Download", top.to_csv(index=False), "top_customers.csv", "text/csv")
+        ci_summary = f"""
+Total Customers in filter: {sales_df['Account Name'].nunique()}
+Total Revenue: {fmt_m(sales_df['SALE'].sum())}
+Class A customers: {(top['ABC']=='A').sum()} — {fmt_m(sales_df[sales_df['Account Name'].isin(top[top['ABC']=='A']['Account Name'])]['SALE'].sum())} revenue
+Class B customers: {(top['ABC']=='B').sum()}
+Class C customers: {(top['ABC']=='C').sum()}
+Avg days since last purchase: {top['Days Since'].mean():.0f} days
+High churn risk customers: {(top.get('Churn Risk','🟢 Low')=='🔴 High').sum() if 'Churn Risk' in top.columns else 'N/A'}
+Top 5 customers: {top.head(5)[['Account Name','Revenue','Bills','Days Since']].to_string(index=False)}
+"""
+        ai_insights_button(ci_summary, "Customer Intelligence — Top Customers", "customers")
     with tab4:
         st.subheader("Full Customer List")
         full = sales_all.groupby('Account Name').agg(Rev=('SALE','sum'),ERP_P=('Profit','sum'),Sqm=('Sq.m','sum'),Bills=('Bill No.','nunique'),Prods=('Product No.','nunique'),First=('Date','min'),Last=('Date','max')).reset_index().sort_values('Rev',ascending=False)
@@ -969,6 +1049,15 @@ elif page == "🧑‍💼 Salesman Performance":
     if is_admin: sal_tot['Act M%']=round(sal['Act_P'].sum()/sal['Revenue'].sum()*100,1) if sal['Revenue'].sum()>0 else 0; sal_tot['Act Profit']=fmt_m(sal['Act_P'].sum())
     st.dataframe(pd.concat([sal[d],pd.DataFrame([sal_tot])],ignore_index=True), hide_index=True, use_container_width=True)
     st.divider()
+    sp_summary = f"""
+Total Salesmen: {len(sal)}
+Total Revenue: {fmt_m(sal['Revenue'].sum())}
+Total Returns: {fmt_m(sal['Ret_Val'].sum())} ({sal['Return Rate %'].mean():.1f}% avg return rate)
+Top Performer: {sal.iloc[0]['Salesman']} — {fmt_m(sal.iloc[0]['Revenue'])}
+Lowest Performer: {sal.iloc[-1]['Salesman']} — {fmt_m(sal.iloc[-1]['Revenue'])}
+Salesman details: {sal[['Salesman','Revenue','ERP M%','Bills','Customers']].to_string(index=False)}
+"""
+    ai_insights_button(sp_summary, "Salesman Performance Page", "salesman")
     st.subheader("Monthly Salesman Trend")
     sm=sales_df.groupby(['Month','Salesman']).agg(Revenue=('SALE','sum')).reset_index().sort_values(['Month','Revenue'],ascending=[True,False])
     sm['Revenue']=sm['Revenue'].apply(fmt_k)
@@ -1221,6 +1310,16 @@ elif page == "⚠️ Reorder Alerts":
     c1,c2,c3=st.columns(3)
     c1.metric("Products Needing Reorder",f"{len(reorder):,}"); c2.metric("Total Reorder Qty",f"{reorder['Suggested Reorder Sqm'].sum():,.0f} sqm"); c3.metric("Estimated Reorder Value",fmt_m(reorder['Reorder Value (Rs)'].sum()))
     st.divider()
+    ra_summary = f"""
+Products Needing Reorder: {len(reorder)}
+Total Reorder Qty: {reorder['Suggested Reorder Sqm'].sum():,.0f} sqm
+Estimated Reorder Investment: {fmt_m(reorder['Reorder Value (Rs)'].sum())}
+Avg Months of Stock Remaining: {reorder['Months of Stock'].mean():.1f} months
+Top Brand needing reorder: {reorder.groupby('Brand Name')['Reorder Value (Rs)'].sum().idxmax() if len(reorder)>0 else 'N/A'}
+Products with <0.5 months stock: {(reorder['Months of Stock']<0.5).sum()}
+Top 5 by reorder value: {reorder.nlargest(5,'Reorder Value (Rs)')[['Product No.','Reorder Value (Rs)','Sales Velocity/Month']].to_string(index=False)}
+"""
+    ai_insights_button(ra_summary, "Reorder Alerts Page", "reorder")
     cols=['Product No.','Brand Name','Category','Size','Current Stock Sqm','Months of Stock','Sales Velocity/Month','Reorder Score','Suggested Reorder Sqm','Suggested Reorder Boxes','Reorder Value (Rs)']
     st.dataframe(reorder[cols], hide_index=True, use_container_width=True)
     st.download_button("📥 Download", reorder[cols].to_csv(index=False), "reorder_alerts.csv", "text/csv")
@@ -2152,3 +2251,964 @@ Be specific and practical. These briefs will be sent directly to a Chinese tile 
 - Set your market focus and price point before running
 """)
 
+
+elif page == "📚 Document Chat (RAG)":
+    st.title("📚 Document Chat")
+    st.caption("Upload any document — supplier catalog, FBR notice, price list, SOP — then ask questions in plain English")
+
+    # ── How it works ─────────────────────────────────────────
+    with st.expander("ℹ️ How this works", expanded=False):
+        st.markdown("""
+**What you can upload:**
+- Supplier catalogs (PDF)
+- FBR / tax notices (PDF)
+- Canton Fair brochures (PDF)
+- Price lists (PDF or TXT)
+- Standard Operating Procedures (PDF)
+- WhatsApp chat exports (TXT)
+- Any text-based document
+
+**How it works:**
+1. Upload your document — text is extracted automatically
+2. Type your question in plain English (Urdu works too)
+3. Claude reads the document and answers with exact quotes
+
+**Limits:**
+- PDF up to ~300 pages per session
+- For very large documents, the system automatically finds the most relevant sections
+- Cost: approximately Rs 3–8 per question
+        """)
+
+    st.divider()
+
+    # ── Document upload ───────────────────────────────────────
+    st.subheader("📄 Step 1 — Upload Document(s)")
+
+    uploaded_docs = st.file_uploader(
+        "Upload PDF, TXT, or CSV files",
+        type=['pdf','txt','csv'],
+        accept_multiple_files=True,
+        key="rag_upload"
+    )
+
+    # Session state for extracted text and chat history
+    if 'rag_docs'    not in st.session_state: st.session_state['rag_docs']    = {}
+    if 'rag_history' not in st.session_state: st.session_state['rag_history'] = []
+
+    if uploaded_docs:
+        for doc in uploaded_docs:
+            if doc.name not in st.session_state['rag_docs']:
+                with st.spinner(f"Extracting text from {doc.name}..."):
+                    text = ""
+                    try:
+                        if doc.name.lower().endswith('.pdf'):
+                            import PyPDF2, io
+                            reader = PyPDF2.PdfReader(io.BytesIO(doc.read()))
+                            for page_num, page in enumerate(reader.pages):
+                                page_text = page.extract_text()
+                                if page_text:
+                                    text += f"\n--- Page {page_num+1} ---\n{page_text}"
+                        elif doc.name.lower().endswith('.csv'):
+                            import io
+                            df_doc = pd.read_csv(io.BytesIO(doc.read()))
+                            text = f"CSV File: {doc.name}\n\nColumns: {', '.join(df_doc.columns)}\n\n"
+                            text += df_doc.to_string(index=False)
+                        else:  # txt
+                            text = doc.read().decode('utf-8', errors='ignore')
+
+                        word_count = len(text.split())
+                        st.session_state['rag_docs'][doc.name] = {
+                            'text': text,
+                            'words': word_count,
+                            'pages': len(text.split('--- Page')) - 1 if '.pdf' in doc.name else 1
+                        }
+                        st.success(f"✅ {doc.name} — {word_count:,} words extracted")
+                    except Exception as e:
+                        st.error(f"Could not extract text from {doc.name}: {e}")
+
+    # Show loaded documents
+    if st.session_state['rag_docs']:
+        st.subheader("📂 Loaded Documents")
+        for name, info in st.session_state['rag_docs'].items():
+            c1,c2,c3 = st.columns([3,1,1])
+            with c1: st.markdown(f"📄 **{name}**")
+            with c2: st.caption(f"{info['words']:,} words")
+            with c3:
+                if st.button("🗑️ Remove", key=f"rag_rm_{name}"):
+                    del st.session_state['rag_docs'][name]
+                    st.rerun()
+
+        st.divider()
+
+        # ── Chat interface ────────────────────────────────────
+        st.subheader("💬 Step 2 — Ask Questions")
+
+        # Show chat history
+        for msg in st.session_state['rag_history']:
+            with st.chat_message(msg['role']):
+                st.markdown(msg['content'])
+
+        # Question input
+        question = st.chat_input("Ask anything about your documents... (English or Urdu)")
+
+        if question:
+            # Add user message to history
+            st.session_state['rag_history'].append({'role':'user','content':question})
+            with st.chat_message("user"):
+                st.markdown(question)
+
+            with st.chat_message("assistant"):
+                with st.spinner("Reading documents and finding answer..."):
+                    try:
+                        from anthropic import Anthropic
+                        client = Anthropic(api_key=st.secrets.get("ANTHROPIC_API_KEY",""))
+
+                        # Combine all document text
+                        all_text = ""
+                        for name, info in st.session_state['rag_docs'].items():
+                            all_text += f"\n\n{'='*60}\nDOCUMENT: {name}\n{'='*60}\n{info['text']}"
+
+                        # Smart chunking for large documents
+                        # Claude Sonnet: ~180K token context, ~750 words per 1K tokens
+                        # Safe limit: 120K tokens = ~90,000 words
+                        MAX_WORDS = 90000
+                        total_words = len(all_text.split())
+
+                        if total_words > MAX_WORDS:
+                            # Find most relevant sections using keyword matching
+                            q_words = set(question.lower().split())
+                            chunks = []
+                            chunk_size = 500  # words per chunk
+                            words = all_text.split()
+
+                            for i in range(0, len(words), chunk_size):
+                                chunk = ' '.join(words[i:i+chunk_size])
+                                # Score by keyword overlap
+                                chunk_words = set(chunk.lower().split())
+                                score = len(q_words & chunk_words)
+                                chunks.append((score, chunk))
+
+                            # Take top chunks up to limit
+                            chunks.sort(key=lambda x: -x[0])
+                            selected = []
+                            word_count = 0
+                            for score, chunk in chunks:
+                                if word_count + chunk_size > MAX_WORDS: break
+                                selected.append(chunk)
+                                word_count += chunk_size
+
+                            context_text = '\n\n'.join(selected)
+                            context_note = f"⚠️ Document too large — showing {len(selected)} most relevant sections out of {total_words//chunk_size} total."
+                        else:
+                            context_text = all_text
+                            context_note = None
+
+                        # Build conversation history for multi-turn
+                        messages = []
+                        # Add previous turns (last 6 exchanges max to save tokens)
+                        for prev in st.session_state['rag_history'][:-1][-12:]:
+                            messages.append({"role": prev['role'], "content": prev['content']})
+
+                        # Current question with document context
+                        system_prompt = f"""You are a helpful document assistant for Mi-Tiles, a tile showroom in Lahore, Pakistan.
+
+You have been given the following documents to answer questions about:
+{chr(10).join(f"- {name} ({info['words']:,} words)" for name, info in st.session_state['rag_docs'].items())}
+
+RULES:
+1. Answer ONLY based on the document content provided
+2. If the answer is in the document, quote the relevant section exactly
+3. If the answer is NOT in the document, say so clearly — do not guess
+4. For numbers (prices, quantities, dates), be exact and cite which document/page
+5. You can respond in Urdu if the question is in Urdu
+6. Keep answers concise but complete
+
+DOCUMENTS:
+{context_text}"""
+
+                        messages.append({
+                            "role": "user",
+                            "content": question
+                        })
+
+                        response = client.messages.create(
+                            model="claude-sonnet-4-6",
+                            max_tokens=2000,
+                            system=system_prompt,
+                            messages=messages
+                        )
+
+                        answer = response.content[0].text
+
+                        # Show context note if document was truncated
+                        if context_note:
+                            st.caption(context_note)
+
+                        st.markdown(answer)
+
+                        # Token usage
+                        usage = response.usage
+                        cost = (usage.input_tokens * 3 + usage.output_tokens * 15) / 1_000_000
+                        st.caption(f"🔢 {usage.input_tokens:,} input + {usage.output_tokens:,} output tokens — ~Rs {cost*280:.1f} cost")
+
+                        st.session_state['rag_history'].append({'role':'assistant','content':answer})
+
+                    except Exception as e:
+                        err_msg = f"Error: {e}"
+                        st.error(err_msg)
+                        if "api_key" in str(e).lower() or "auth" in str(e).lower():
+                            st.info("Add ANTHROPIC_API_KEY to Streamlit Cloud → Settings → Secrets")
+                        st.session_state['rag_history'].append({'role':'assistant','content':err_msg})
+
+        # ── Controls ──────────────────────────────────────────
+        st.divider()
+        c1,c2,c3 = st.columns(3)
+        with c1:
+            if st.button("🗑️ Clear Chat History", key="rag_clear_chat"):
+                st.session_state['rag_history'] = []
+                st.rerun()
+        with c2:
+            if st.button("📂 Clear All Documents", key="rag_clear_docs"):
+                st.session_state['rag_docs'] = {}
+                st.session_state['rag_history'] = []
+                st.rerun()
+        with c3:
+            if st.session_state['rag_history']:
+                chat_export = '\n\n'.join(
+                    f"{'You' if m['role']=='user' else 'Assistant'}: {m['content']}"
+                    for m in st.session_state['rag_history']
+                )
+                st.download_button("📥 Download Chat", chat_export,
+                                   "document_chat.txt", "text/plain", key="rag_dl")
+
+        # ── Suggested questions ───────────────────────────────
+        if not st.session_state['rag_history']:
+            st.subheader("💡 Example Questions")
+            doc_names = list(st.session_state['rag_docs'].keys())
+            st.markdown(f"""
+**For supplier catalogs:**
+- What sizes are available in the marble collection?
+- Which products come in 120x260 cm?
+- What is the minimum order quantity?
+- List all anti-slip options
+
+**For FBR / tax documents:**
+- What is the deadline mentioned in this notice?
+- What amount is being demanded?
+- What are the grounds for the notice?
+
+**For price lists:**
+- What is the price of 60x120 Polish tiles?
+- Compare prices between these two suppliers
+- Which products are in the Rs 1,500-2,000 range?
+
+**For SOPs:**
+- What is the process for handling customer returns?
+- What are the steps for placing a supplier order?
+            """)
+
+    else:
+        st.info("👆 Upload a document above to get started")
+        st.markdown("""
+**Example use cases:**
+
+🏭 **Supplier Catalog** — Upload a Chinese supplier PDF, ask:
+*"Do you have 120x260 lappato in grey tones?"*
+
+📋 **FBR Notice** — Upload your tax notice, ask:
+*"What is the deadline and what documents are required?"*
+
+💰 **Price List** — Upload a price list, ask:
+*"What's the price difference between Matt and Polish finish in 60x120?"*
+
+📱 **WhatsApp Export** — Export a supplier chat, ask:
+*"What delivery date did they promise for the last order?"*
+        """)
+
+
+elif page == "📚 Document Chat (RAG)":
+    st.title("📚 Document Chat")
+    st.caption("Upload PDFs or text files — then ask questions in plain English. "
+               "Works with supplier catalogs, FBR notices, agreements, SOPs, price lists.")
+
+    # ── How it works ─────────────────────────────────────────
+    with st.expander("ℹ️ How this works", expanded=False):
+        st.markdown("""
+**Upload → Index → Ask**
+
+1. Upload any PDF, TXT, or CSV file (supplier catalog, FBR notice, agreement, price list)
+2. The system splits it into chunks and builds a searchable index
+3. You ask a question — it finds the most relevant chunks and passes them to Claude
+4. Claude answers using *only* your uploaded documents, with source references
+
+**Best for:**
+- Canton Fair / supplier catalogs — *"Which products come in 120x260?"*
+- FBR / legal notices — *"What is the penalty amount in the notice?"*
+- Supplier agreements — *"What are the payment terms?"*
+- Price lists — *"What is the rate for 60x120 lappato?"*
+- Internal SOPs — *"What is the return procedure for damaged goods?"*
+
+**Limitation:** Keyword-based matching. Works best with product/document queries.
+Scanned image PDFs (non-searchable) will not work.
+""")
+
+    st.divider()
+
+    # ── File upload ───────────────────────────────────────────
+    st.subheader("📂 Step 1 — Upload Documents")
+    uploaded_docs = st.file_uploader(
+        "Upload PDFs, TXT, or CSV files",
+        type=['pdf','txt','csv'],
+        accept_multiple_files=True,
+        key="rag_upload"
+    )
+
+    # ── Build index ───────────────────────────────────────────
+    if uploaded_docs:
+
+        # Only re-index if files changed
+        doc_names = [f.name for f in uploaded_docs]
+        if st.session_state.get('rag_doc_names') != doc_names:
+
+            with st.spinner("Reading and indexing documents..."):
+                import io
+                from sklearn.feature_extraction.text import TfidfVectorizer
+                from sklearn.metrics.pairwise import cosine_similarity
+
+                all_chunks = []  # list of {text, source, page}
+
+                for doc in uploaded_docs:
+                    raw_text = ""
+                    ext = doc.name.split('.')[-1].lower()
+
+                    # Extract text
+                    if ext == 'pdf':
+                        try:
+                            import PyPDF2
+                            reader = PyPDF2.PdfReader(io.BytesIO(doc.read()))
+                            for page_num, page in enumerate(reader.pages):
+                                page_text = page.extract_text() or ""
+                                if page_text.strip():
+                                    # Chunk by page
+                                    all_chunks.append({
+                                        'text': page_text.strip(),
+                                        'source': doc.name,
+                                        'page': page_num + 1
+                                    })
+                        except Exception as e:
+                            st.warning(f"Could not read {doc.name}: {e}")
+                            continue
+
+                    elif ext == 'txt':
+                        raw_text = doc.read().decode('utf-8', errors='ignore')
+                        # Chunk by 800 chars with 100 char overlap
+                        chunk_size = 800; overlap = 100
+                        for i in range(0, len(raw_text), chunk_size - overlap):
+                            chunk = raw_text[i:i+chunk_size].strip()
+                            if chunk:
+                                all_chunks.append({
+                                    'text': chunk,
+                                    'source': doc.name,
+                                    'page': i // chunk_size + 1
+                                })
+
+                    elif ext == 'csv':
+                        try:
+                            csv_df = pd.read_csv(io.BytesIO(doc.read()), dtype=str).fillna('')
+                            # Convert each row to text
+                            for i, row in csv_df.iterrows():
+                                row_text = ' | '.join([f"{col}: {val}" for col,val in row.items() if val.strip()])
+                                if row_text.strip():
+                                    all_chunks.append({
+                                        'text': row_text,
+                                        'source': doc.name,
+                                        'page': i + 1
+                                    })
+                        except Exception as e:
+                            st.warning(f"Could not read {doc.name}: {e}")
+                            continue
+
+                if not all_chunks:
+                    st.error("No text could be extracted. Make sure PDFs are not scanned images.")
+                    st.stop()
+
+                # Build TF-IDF index
+                texts = [c['text'] for c in all_chunks]
+                vectorizer = TfidfVectorizer(
+                    max_features=10000,
+                    ngram_range=(1,2),
+                    stop_words='english',
+                    min_df=1
+                )
+                tfidf_matrix = vectorizer.fit_transform(texts)
+
+                # Store in session state
+                st.session_state['rag_chunks']     = all_chunks
+                st.session_state['rag_vectorizer'] = vectorizer
+                st.session_state['rag_matrix']     = tfidf_matrix
+                st.session_state['rag_doc_names']  = doc_names
+                st.session_state['rag_history']    = []
+
+            st.success(f"✅ Indexed {len(all_chunks):,} chunks from {len(uploaded_docs)} file(s)")
+
+        # Show index stats
+        chunks = st.session_state.get('rag_chunks', [])
+        c1,c2,c3 = st.columns(3)
+        c1.metric("Documents", len(uploaded_docs))
+        c2.metric("Chunks indexed", len(chunks))
+        sources = list(set(c['source'] for c in chunks))
+        c3.metric("Searchable files", len(sources))
+
+        st.divider()
+
+        # ── Chat interface ────────────────────────────────────
+        st.subheader("💬 Step 2 — Ask Questions")
+
+        # Settings
+        with st.expander("⚙️ Settings", expanded=False):
+            c1,c2 = st.columns(2)
+            with c1:
+                top_k = st.slider("Chunks to retrieve (more = broader context)",
+                                  min_value=3, max_value=10, value=5, key="rag_topk")
+            with c2:
+                show_sources = st.checkbox("Show source chunks", value=True, key="rag_sources")
+
+        # Chat history display
+        history = st.session_state.get('rag_history', [])
+        for msg in history:
+            with st.chat_message(msg['role']):
+                st.markdown(msg['content'])
+                if msg.get('sources') and show_sources:
+                    with st.expander("📄 Source chunks used", expanded=False):
+                        for s in msg['sources']:
+                            st.markdown(f"**{s['source']}** (chunk {s['page']})")
+                            st.caption(s['text'][:400] + "..." if len(s['text'])>400 else s['text'])
+                            st.divider()
+
+        # Question input
+        question = st.chat_input("Ask a question about your documents...",
+                                  key="rag_input")
+
+        if question:
+            # Add user message to history
+            history.append({'role':'user','content':question})
+            with st.chat_message("user"):
+                st.markdown(question)
+
+            with st.chat_message("assistant"):
+                with st.spinner("Searching documents..."):
+
+                    from sklearn.metrics.pairwise import cosine_similarity
+
+                    # Retrieve top-k chunks
+                    vectorizer = st.session_state['rag_vectorizer']
+                    matrix     = st.session_state['rag_matrix']
+                    chunks     = st.session_state['rag_chunks']
+
+                    q_vec      = vectorizer.transform([question])
+                    sims       = cosine_similarity(q_vec, matrix).flatten()
+                    top_idx    = sims.argsort()[-top_k:][::-1]
+                    top_chunks = [chunks[i] for i in top_idx if sims[i] > 0]
+
+                    if not top_chunks:
+                        answer = ("I couldn't find relevant information in the uploaded documents "
+                                  "for that question. Try rephrasing or check that the document "
+                                  "contains text (not scanned images).")
+                        st.markdown(answer)
+                        history.append({'role':'assistant','content':answer,'sources':[]})
+                    else:
+                        # Build context
+                        context = "\n\n---\n\n".join([
+                            f"[Source: {c['source']}, chunk {c['page']}]\n{c['text']}"
+                            for c in top_chunks
+                        ])
+
+                        # Build conversation history for multi-turn
+                        conv_history = ""
+                        if len(history) > 2:
+                            prev = history[-4:-1]  # last 3 exchanges
+                            conv_history = "\n".join([
+                                f"{'User' if m['role']=='user' else 'Assistant'}: {m['content'][:200]}"
+                                for m in prev
+                            ])
+
+                        rag_prompt = f"""You are a helpful assistant for Mi-Tiles, a tile showroom in Lahore, Pakistan.
+Answer the user's question using ONLY the document excerpts provided below.
+If the answer is not in the documents, say "I couldn't find this in the uploaded documents."
+Always mention which document/source your answer comes from.
+Be specific — quote exact product names, prices, quantities where available.
+
+DOCUMENT EXCERPTS:
+{context}
+
+{"CONVERSATION HISTORY:" + conv_history if conv_history else ""}
+
+USER QUESTION: {question}
+
+ANSWER:"""
+
+                        try:
+                            from anthropic import Anthropic
+                            client = Anthropic(api_key=st.secrets.get("ANTHROPIC_API_KEY",""))
+                            response = client.messages.create(
+                                model="claude-sonnet-4-6",
+                                max_tokens=1500,
+                                messages=[{"role":"user","content":rag_prompt}]
+                            )
+                            answer = response.content[0].text
+                            st.markdown(answer)
+
+                            if show_sources:
+                                with st.expander("📄 Source chunks used", expanded=False):
+                                    for c in top_chunks:
+                                        st.markdown(f"**{c['source']}** (chunk {c['page']})  "
+                                                    f"*similarity: {sims[chunks.index(c)]:.3f}*")
+                                        st.caption(c['text'][:400]+"..." if len(c['text'])>400 else c['text'])
+                                        st.divider()
+
+                            history.append({
+                                'role':'assistant',
+                                'content':answer,
+                                'sources':top_chunks
+                            })
+
+                        except Exception as e:
+                            err = f"API error: {e}. Check ANTHROPIC_API_KEY in Streamlit secrets."
+                            st.error(err)
+                            history.append({'role':'assistant','content':err,'sources':[]})
+
+            st.session_state['rag_history'] = history
+
+        # Clear chat button
+        if history:
+            if st.button("🗑️ Clear conversation", key="rag_clear"):
+                st.session_state['rag_history'] = []
+                st.rerun()
+
+        st.divider()
+
+        # ── Suggested questions ───────────────────────────────
+        st.subheader("💡 Suggested Questions")
+        st.caption("Click any to use as your question")
+        suggestions = [
+            "List all products available in 120x260 size",
+            "What are the payment terms?",
+            "Which tiles have anti-slip rating?",
+            "What is the penalty amount mentioned?",
+            "List all marble-look polished tiles",
+            "What sizes does this supplier offer?",
+            "What is the price per sqm for lappato finish?",
+            "Summarise the key points of this document",
+        ]
+        cols = st.columns(2)
+        for i, sug in enumerate(suggestions):
+            with cols[i%2]:
+                if st.button(sug, key=f"rag_sug_{i}", use_container_width=True):
+                    st.session_state['rag_suggested'] = sug
+                    st.rerun()
+
+        # Handle suggested question click
+        if 'rag_suggested' in st.session_state:
+            sug_q = st.session_state.pop('rag_suggested')
+            st.info(f"Type this in the chat box above: **{sug_q}**")
+
+    else:
+        # No files uploaded yet
+        st.info("👆 Upload your documents above to get started.")
+        st.markdown("""
+**What to upload:**
+- **Supplier catalogs** (PDF from Canton Fair, Baldocer, etc.)
+- **FBR notices** — ask about penalty amounts, deadlines, specific clauses
+- **Purchase agreements** — payment terms, warranties, conditions
+- **Price lists** (PDF or CSV)
+- **Internal SOPs** — return procedures, warehouse processes
+
+**Tips for best results:**
+- PDFs must be text-based (not scanned images)
+- Larger files take a few seconds to index
+- You can upload multiple files and ask cross-document questions
+- The conversation is multi-turn — ask follow-up questions naturally
+""")
+
+elif page == "🔍 Product Audit":
+    if not is_admin: st.error("Admin only."); st.stop()
+    st.title("🔍 Product Audit — Physical vs ERP")
+    st.caption("Enter physical counts to reconcile against ERP closing stock. Identifies shrinkage, miscounts, and data entry errors.")
+
+    # ── Audit Cycle Guide ────────────────────────────────────
+    with st.expander("📅 Recommended Audit Schedule", expanded=False):
+        today_audit = datetime.now()
+        month = today_audit.month
+        # Determine next audit dates
+        next_monthly  = today_audit.replace(day=5) if today_audit.day < 5 else (today_audit.replace(month=month%12+1, day=5) if month<12 else today_audit.replace(year=today_audit.year+1, month=1, day=5))
+        quarterly_months = [1,4,7,10]
+        next_q_month = next(m for m in quarterly_months if m > month) if any(m > month for m in quarterly_months) else 1
+        next_q_year  = today_audit.year if next_q_month > month else today_audit.year+1
+
+        st.markdown(f"""
+| Tier | Products | Frequency | Next Due | Criteria |
+|------|----------|-----------|----------|----------|
+| 🔴 **A** | High Value | Monthly | **5th of every month** | Stock Value > Rs 500K or Velocity > 100 sqm/mo |
+| 🟡 **B** | Medium Value | Quarterly | **1st {datetime(next_q_year,next_q_month,1).strftime('%b %Y')}** | Stock Value Rs 100K–500K |
+| 🟢 **C** | Low/Slow | Semi-Annual | **1st Jul 2026** | Stock Value < Rs 100K |
+
+**Spot Audit Triggers — count immediately if:**
+- Any product shows variance > 10% from last audit
+- ERP closing goes negative (impossible physically)
+- Fast mover has < 15 days stock cover
+- ML flags product as High dead stock risk
+
+**Shrinkage Benchmark:** Industry standard 0.5–1.5% of inventory value
+**Your tolerance:** Rs {pi['Stock Value PKR'].sum()*0.01/1e6:.1f}M (1% of Rs {fmt_m(pi['Stock Value PKR'].sum())})
+        """)
+
+    st.divider()
+
+    # ── Audit Tier Filter ────────────────────────────────────
+    st.subheader("📋 Select Audit Batch")
+    c1,c2,c3,c4 = st.columns(4)
+    with c1:
+        audit_tier = st.selectbox("Audit Tier", [
+            "🔴 Tier A — High Value (Monthly)",
+            "🟡 Tier B — Medium Value (Quarterly)",
+            "🟢 Tier C — Low/Slow (Semi-Annual)",
+            "⚡ Spot Audit — ML High Risk",
+            "🎯 Custom Filter"
+        ], key="aud_tier")
+    with c2:
+        br_aud = st.selectbox("Brand", ['All']+sorted(pi['Brand Name'].dropna().unique().tolist()), key="aud_br")
+    with c3:
+        co_aud = st.selectbox("Company", ['All']+sorted(pi['Company Name'].dropna().unique().tolist()), key="aud_co")
+    with c4:
+        wh_aud = st.selectbox("Warehouse", ['All']+sorted(df['Warehouse'].dropna().unique().tolist()), key="aud_wh")
+
+    # Filter pi based on tier
+    audit_pi = pi[pi['Current Stock Sqm'] > 0].copy()
+    if br_aud != 'All': audit_pi = audit_pi[audit_pi['Brand Name']==br_aud]
+    if co_aud != 'All': audit_pi = audit_pi[audit_pi['Company Name']==co_aud]
+
+    if "Tier A" in audit_tier:
+        audit_pi = audit_pi[(audit_pi['Stock Value PKR']>=500000)|(audit_pi['Sales Velocity/Month']>=100)]
+    elif "Tier B" in audit_tier:
+        audit_pi = audit_pi[(audit_pi['Stock Value PKR']>=100000)&(audit_pi['Stock Value PKR']<500000)]
+    elif "Tier C" in audit_tier:
+        audit_pi = audit_pi[audit_pi['Stock Value PKR']<100000]
+    elif "Spot" in audit_tier:
+        if 'Risk Label' in audit_pi.columns:
+            audit_pi = audit_pi[audit_pi['Risk Label']=='🔴 High']
+        else:
+            audit_pi = audit_pi[audit_pi['Stock Health']=='Reorder Now']
+
+    audit_pi = audit_pi.sort_values('Stock Value PKR', ascending=False)
+
+    c1,c2,c3 = st.columns(3)
+    c1.metric("Products to Count", f"{len(audit_pi):,}")
+    c2.metric("ERP Stock Value",   fmt_m(audit_pi['Stock Value PKR'].sum()))
+    c3.metric("ERP Stock Sqm",     f"{audit_pi['Current Stock Sqm'].sum():,.1f}")
+
+    st.divider()
+
+    # ── Download count sheet ─────────────────────────────────
+    count_sheet = audit_pi[['Product No.','Brand Name','Category','Size',
+                              'Current Stock Sqm','WAC Rate','Stock Value PKR']].copy()
+    count_sheet['Physical Count (Sqm)'] = ''
+    count_sheet['Counted By'] = ''
+    count_sheet['Count Date'] = ''
+    count_sheet['Notes'] = ''
+    st.download_button(
+        "📥 Download Count Sheet (CSV)",
+        count_sheet.to_csv(index=False),
+        f"audit_count_sheet_{datetime.now().strftime('%Y%m%d')}.csv",
+        "text/csv", key="aud_dl_sheet"
+    )
+    st.caption("Download → fill in Physical Count column → upload below")
+
+    st.divider()
+
+    # ── Upload completed count ────────────────────────────────
+    st.subheader("📤 Upload Completed Count")
+    uploaded_count = st.file_uploader(
+        "Upload filled count sheet (CSV)",
+        type=['csv'], key="aud_upload"
+    )
+
+    # OR manual entry
+    st.markdown("**— OR enter counts manually —**")
+    if 'audit_manual' not in st.session_state:
+        st.session_state['audit_manual'] = {}
+
+    # Show top 20 for manual entry
+    manual_products = audit_pi.head(20)[['Product No.','Brand Name','Size','Current Stock Sqm','WAC Rate']].copy()
+    st.caption("Manual entry for top 20 products by value. Download full sheet for complete audit.")
+
+    manual_data = []
+    for _, row in manual_products.iterrows():
+        c1,c2,c3,c4 = st.columns([3,1,1,1])
+        with c1: st.markdown(f"**{row['Product No.']}** — {row['Brand Name']} {row['Size']}")
+        with c2: st.markdown(f"ERP: **{row['Current Stock Sqm']:.2f}**")
+        with c3:
+            physical = st.number_input(
+                "Physical", value=float(row['Current Stock Sqm']),
+                step=0.01, format="%.2f",
+                key=f"aud_{row['Product No.'].replace(' ','_')[:20]}"
+            )
+        with c4:
+            variance = physical - row['Current Stock Sqm']
+            color = "🟢" if abs(variance)<0.1 else ("🟡" if abs(variance/max(row['Current Stock Sqm'],0.01))<0.1 else "🔴")
+            st.markdown(f"{color} {variance:+.2f}")
+        manual_data.append({
+            'Product No.': row['Product No.'],
+            'ERP Sqm': row['Current Stock Sqm'],
+            'Physical Sqm': physical,
+            'WAC Rate': row['WAC Rate']
+        })
+
+    # Process results
+    if uploaded_count or manual_data:
+        st.divider()
+        st.subheader("📊 Variance Report")
+
+        if uploaded_count:
+            import io
+            count_df = pd.read_csv(io.BytesIO(uploaded_count.read()))
+            count_df.columns = [c.strip() for c in count_df.columns]
+            # Find physical count column
+            phys_col = next((c for c in count_df.columns if 'Physical' in c or 'physical' in c), None)
+            if phys_col:
+                count_df['Physical Sqm'] = pd.to_numeric(count_df[phys_col], errors='coerce')
+                count_df = count_df.dropna(subset=['Physical Sqm'])
+                count_df = count_df.merge(
+                    audit_pi[['Product No.','Current Stock Sqm','WAC Rate','Brand Name','Category','Size']],
+                    on='Product No.', how='left'
+                )
+                recon_df = count_df[['Product No.','Brand Name','Category','Size',
+                                     'Current Stock Sqm','Physical Sqm','WAC Rate']].copy()
+            else:
+                st.error("Could not find 'Physical Count' column in uploaded file")
+                recon_df = pd.DataFrame(manual_data)
+        else:
+            recon_df = pd.DataFrame(manual_data)
+            recon_df = recon_df.merge(
+                audit_pi[['Product No.','Brand Name','Category','Size']],
+                on='Product No.', how='left'
+            )
+
+        recon_df['ERP Sqm']      = recon_df.get('Current Stock Sqm', recon_df.get('ERP Sqm', 0))
+        recon_df['Variance Sqm'] = (recon_df['Physical Sqm'] - recon_df['ERP Sqm']).round(3)
+        recon_df['Variance %']   = (recon_df['Variance Sqm'] / recon_df['ERP Sqm'].replace(0,np.nan) * 100).round(1)
+        recon_df['Variance Value'] = (recon_df['Variance Sqm'] * recon_df['WAC Rate']).round(0)
+        recon_df['Status'] = recon_df['Variance %'].apply(
+            lambda x: '✅ Match' if abs(x)<2 else ('🟡 Minor (<10%)' if abs(x)<10 else '🔴 Major (>10%)')
+        )
+
+        # Summary metrics
+        total_var_val = recon_df['Variance Value'].sum()
+        shrinkage     = recon_df[recon_df['Variance Sqm']<0]['Variance Value'].abs().sum()
+        overcount     = recon_df[recon_df['Variance Sqm']>0]['Variance Value'].sum()
+        match_pct     = (recon_df['Status']=='✅ Match').mean()*100
+
+        c1,c2,c3,c4 = st.columns(4)
+        c1.metric("Products Matched",    f"{(recon_df['Status']=='✅ Match').sum():,} / {len(recon_df)}")
+        c2.metric("Match Rate",          f"{match_pct:.1f}%")
+        c3.metric("Shrinkage Value",     fmt_m(shrinkage), delta=f"-{shrinkage/pi['Stock Value PKR'].sum()*100:.2f}% of total stock", delta_color="inverse")
+        c4.metric("Net Variance",        fmt_m(total_var_val))
+
+        # Variances table
+        st.dataframe(
+            recon_df[['Product No.','Brand Name','Size','ERP Sqm','Physical Sqm',
+                       'Variance Sqm','Variance %','Variance Value','Status']].sort_values('Variance Value'),
+            hide_index=True, use_container_width=True
+        )
+        st.download_button(
+            "📥 Download Variance Report",
+            recon_df.to_csv(index=False),
+            f"audit_variance_{datetime.now().strftime('%Y%m%d')}.csv",
+            "text/csv", key="aud_dl_var"
+        )
+
+        # AI insights on audit results
+        aud_summary = f"""
+Audit Date: {datetime.now().strftime('%d %b %Y')}
+Tier: {audit_tier}
+Products Counted: {len(recon_df)}
+Match Rate: {match_pct:.1f}%
+Total Shrinkage: {fmt_m(shrinkage)} ({shrinkage/pi['Stock Value PKR'].sum()*100:.2f}% of total inventory)
+Total Overcount: {fmt_m(overcount)}
+Major variances (>10%): {(recon_df['Status']=='🔴 Major (>10%)').sum()} products
+Top 3 variances: {recon_df.reindex(recon_df['Variance Value'].abs().nlargest(3).index)[['Product No.','Variance Sqm','Variance Value']].to_string(index=False)}
+"""
+        ai_insights_button(aud_summary, "Product Audit — Variance Analysis", "audit")
+
+
+elif page == "💡 Investment Advisor":
+    if not is_admin: st.error("Admin only."); st.stop()
+    st.title("💡 Investment Advisor")
+    st.caption("Where should Mi-Tiles invest its next procurement budget? AI analysis based on your actual sales, margins, and inventory data.")
+
+    st.divider()
+
+    # ── Budget input ─────────────────────────────────────────
+    c1,c2,c3 = st.columns(3)
+    with c1:
+        budget = st.number_input(
+            "Available Budget (Rs)",
+            value=5000000, step=500000, format="%d",
+            key="inv_budget",
+            help="How much are you planning to invest in next procurement?"
+        )
+    with c2:
+        horizon = st.selectbox(
+            "Investment Horizon",
+            ["1 month","3 months","6 months","12 months"],
+            index=1, key="inv_horizon"
+        )
+    with c3:
+        risk_pref = st.selectbox(
+            "Risk Preference",
+            ["Conservative — proven sellers only",
+             "Balanced — mix of proven and growth",
+             "Aggressive — high growth potential"],
+            index=1, key="inv_risk"
+        )
+
+    focus_brands = st.multiselect(
+        "Focus on specific brands (optional — leave empty for all)",
+        sorted(pi['Brand Name'].dropna().unique().tolist()),
+        key="inv_brands"
+    )
+
+    st.divider()
+
+    if st.button("🤖 Generate Investment Analysis", type="primary", key="inv_run"):
+        with st.spinner("Analysing your inventory, sales velocity, margins and generating recommendations..."):
+
+            # Build comprehensive data summary
+            # Brand performance
+            brand_perf = pi.groupby('Brand Name').agg(
+                products    =('Product No.','count'),
+                stock_val   =('Stock Value PKR','sum'),
+                revenue     =('Total Revenue','sum'),
+                erp_margin  =('ERP Margin %','mean'),
+                velocity    =('Sales Velocity/Month','mean'),
+                dead_count  =('Inventory Status', lambda x:(x=='Dead Stock').sum()),
+                reorder_now =('Stock Health', lambda x:(x=='Reorder Now').sum()),
+                high_risk   =('Risk Label', lambda x:(x=='🔴 High').sum()) if 'Risk Label' in pi.columns else ('Stock Value PKR','count')
+            ).reset_index()
+
+            if focus_brands:
+                brand_perf = brand_perf[brand_perf['Brand Name'].isin(focus_brands)]
+
+            brand_perf['dead_pct']   = (brand_perf['dead_count']/brand_perf['products']*100).round(1)
+            brand_perf['stock_turn'] = (brand_perf['revenue']/brand_perf['stock_val'].replace(0,np.nan)).round(2)
+            brand_perf = brand_perf.sort_values('revenue', ascending=False)
+
+            # Category performance
+            cat_perf = pi.groupby('Category').agg(
+                revenue  =('Total Revenue','sum'),
+                velocity =('Sales Velocity/Month','mean'),
+                margin   =('ERP Margin %','mean'),
+                stock_val=('Stock Value PKR','sum')
+            ).reset_index().sort_values('revenue',ascending=False)
+
+            # Stockout risks — products with <1 month stock and high velocity
+            stockout_risk = pi[(pi['Stock Health']=='Reorder Now')&(pi['Sales Velocity/Month']>50)].nlargest(10,'Sales Velocity/Month')
+
+            # Best performing products — high velocity + good margin + proven
+            stars = pi[(pi['Sales Velocity/Month']>50)&(pi['Inventory Status'].isin(['Active']))].nlargest(15,'Total Revenue')
+
+            # Dead stock capital tied up (opportunity cost)
+            dead_capital = pi[pi['Inventory Status']=='Dead Stock']['Stock Value PKR'].sum()
+
+            inv_data = f"""
+INVESTMENT DECISION CONTEXT — MI-TILES
+Budget: Rs {budget:,}
+Horizon: {horizon}
+Risk preference: {risk_pref}
+
+PORTFOLIO OVERVIEW:
+Total Stock Value: {fmt_m(pi['Stock Value PKR'].sum())}
+Dead Stock Value (capital locked): {fmt_m(dead_capital)} — {dead_capital/pi['Stock Value PKR'].sum()*100:.1f}% of total
+Products needing reorder RIGHT NOW: {(pi['Stock Health']=='Reorder Now').sum()}
+
+BRAND PERFORMANCE (sorted by revenue):
+{brand_perf[['Brand Name','revenue','stock_val','erp_margin','velocity','dead_pct','stock_turn','reorder_now']].head(15).to_string(index=False)}
+
+CATEGORY PERFORMANCE:
+{cat_perf.to_string(index=False)}
+
+TOP STOCKOUT RISKS (high velocity, low stock — need investment NOW):
+{stockout_risk[['Product No.','Brand Name','Current Stock Sqm','Sales Velocity/Month','Months of Stock','Stock Value PKR']].to_string(index=False)}
+
+STAR PRODUCTS (high velocity + active — build on winners):
+{stars[['Product No.','Brand Name','Total Revenue','Sales Velocity/Month','ERP Margin %','Current Stock Sqm']].head(10).to_string(index=False)}
+
+DEAD STOCK BY BRAND (where capital is locked — consider liquidating to free budget):
+{pi[pi['Inventory Status']=='Dead Stock'].groupby('Brand Name')['Stock Value PKR'].sum().nlargest(10).to_string()}
+"""
+            try:
+                from anthropic import Anthropic
+                client = Anthropic(api_key=st.secrets.get("ANTHROPIC_API_KEY",""))
+
+                prompt = f"""You are a senior inventory investment strategist for Mi-Tiles, a tile showroom in Lahore, Pakistan.
+
+{inv_data}
+
+Generate a comprehensive investment recommendation report with these exact sections:
+
+## 1. EXECUTIVE SUMMARY
+2-3 sentences on the single most important investment action.
+
+## 2. IMMEDIATE ACTIONS (This Week)
+What to do before spending a single rupee — dead stock liquidation opportunities that can FUND new investment.
+
+## 3. BUDGET ALLOCATION RECOMMENDATION
+Specific Rs amounts for each brand/category. Format as a table:
+| Brand/Category | Recommended Allocation | Reason | Expected ROI |
+
+## 4. TOP 10 SPECIFIC SKUs TO RESTOCK
+The exact products to buy more of, with quantities.
+
+## 5. WHAT TO AVOID
+Brands/categories where investing more money would be a mistake right now.
+
+## 6. 3-MONTH PROJECTION
+If these recommendations are followed, what should stock value, velocity, and dead stock % look like in 3 months?
+
+Be specific with rupee amounts. Use the actual brand names and product codes from the data."""
+
+                response = client.messages.create(
+                    model="claude-sonnet-4-6",
+                    max_tokens=3000,
+                    messages=[{"role":"user","content":prompt}]
+                )
+
+                report = response.content[0].text
+                cost   = (response.usage.input_tokens*3 + response.usage.output_tokens*15)/1_000_000
+
+                st.markdown(report)
+                st.divider()
+                st.caption(f"Analysis based on {len(pi):,} products • {response.usage.input_tokens:,} tokens • ~Rs {cost*280:.1f} cost")
+                st.download_button(
+                    "📥 Download Investment Report",
+                    report,
+                    f"investment_report_{datetime.now().strftime('%Y%m%d')}.txt",
+                    "text/plain", key="inv_dl"
+                )
+
+            except Exception as e:
+                st.error(f"Analysis failed: {e}")
+                if "api_key" in str(e).lower():
+                    st.info("Add ANTHROPIC_API_KEY to Streamlit Cloud → Settings → Secrets")
+    else:
+        st.markdown("""
+**This tool analyses:**
+- Which brands have best ROI and need restocking
+- Which products are about to stock out (revenue risk)
+- Which dead stock to liquidate first to free capital
+- Exact Rs allocation across brands
+- Top 10 specific SKUs to buy more of
+
+**Example output:**
+> *"Invest Rs 2.1M in OREAL CERAMICS 60x120 Polish — velocity 847 sqm/month, only 0.6 months stock left.*
+> *Liquidate CHINA dead stock first (Rs 3.2M recoverable at 70% WAC) to fund this without new capital outlay."*
+        """)
