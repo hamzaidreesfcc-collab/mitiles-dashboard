@@ -109,6 +109,13 @@ def login():
             if u in USERS and USERS[u]["password"] == p:
                 st.session_state.update({'logged_in':True,'user':u,'role':USERS[u]["role"],'name':USERS[u]["name"],'last_active':time.time()})
                 send_login_alert(u)
+                # Log login
+                if 'audit_log' not in st.session_state: st.session_state['audit_log'] = []
+                st.session_state['audit_log'].insert(0, [
+                    datetime.now().strftime('%d-%m-%Y %H:%M:%S'),
+                    USERS[u]["name"], USERS[u]["role"],
+                    "LOGIN", f"User logged in successfully", "—"
+                ])
                 st.rerun()
             else:
                 st.error("Invalid username or password")
@@ -481,14 +488,14 @@ with st.sidebar:
         "📦 Stock Comparison","🔍 Search","📊 Period Comparison",
         "📦 Closing Stock","📋 Income Statement","🏦 Assets Position",
         "📊 Salesman Rate Analysis","🤖 ML Model Health",
-        "🎨 Design Brief Tool","🔍 Product Audit","💡 Investment Advisor",
+        "🎨 Design Brief Tool","🔍 Product Audit","💡 Investment Advisor","📋 Audit Log",
     ]
     _role = st.session_state.get('role','viewer')
     _allowed = _all_pages if ROLE_PAGES.get(_role)=="all" else ROLE_PAGES.get(_role, _all_pages[:3])
     _visible = [p for p in _all_pages if p in _allowed]
     page = st.radio("Navigate", _visible, label_visibility="collapsed")
     st.divider()
-    if st.button("🔄 Refresh Data"): st.cache_data.clear(); st.rerun()
+    if st.button("🔄 Refresh Data"): _log_data_refresh(); st.cache_data.clear(); st.rerun()
     st.caption(f"Updated: {datetime.now().strftime('%d %b %Y %H:%M')}")
 
 # ─────────────────────────────────────────────
@@ -534,6 +541,7 @@ Use 🔴 for urgent, 🟡 for important, 🟢 for opportunity."""
                 )
                 insights = response.content[0].text
                 cost = (response.usage.input_tokens*3 + response.usage.output_tokens*15)/1_000_000
+                _log_ai_call(page_context, cost)
                 with st.expander("🤖 AI Insights", expanded=True):
                     st.markdown(insights)
                     st.caption(f"~Rs {cost*280:.1f} cost • {response.usage.input_tokens:,} tokens")
@@ -541,6 +549,72 @@ Use 🔴 for urgent, 🟡 for important, 🟢 for opportunity."""
                 st.error(f"AI Insights error: {e}")
                 if "api_key" in str(e).lower():
                     st.info("Add ANTHROPIC_API_KEY to Streamlit Cloud → Settings → Secrets")
+
+# ─────────────────────────────────────────────
+# AUDIT LOG SYSTEM
+# ─────────────────────────────────────────────
+def _write_audit_log(event_type: str, details: str, cost_rs: float = 0.0):
+    """Write a single audit event to Google Sheets AUDIT_LOG tab and session state."""
+    import traceback
+    timestamp = datetime.now().strftime('%d-%m-%Y %H:%M:%S')
+    user = st.session_state.get('name', 'Unknown')
+    role = st.session_state.get('role', 'Unknown')
+    row = [timestamp, user, role, event_type, details, f"Rs {cost_rs:.1f}" if cost_rs > 0 else "—"]
+
+    # Add to session state log
+    if 'audit_log' not in st.session_state:
+        st.session_state['audit_log'] = []
+    st.session_state['audit_log'].insert(0, row)
+    if len(st.session_state['audit_log']) > 500:
+        st.session_state['audit_log'] = st.session_state['audit_log'][:500]
+
+    # Write to Google Sheets AUDIT_LOG tab
+    try:
+        import requests as _req, io as _io
+        from google.oauth2 import service_account as _sa
+        import google.auth.transport.requests as _gatr
+
+        _creds = _sa.Credentials.from_service_account_info(
+            st.secrets["gcp_service_account"],
+            scopes=["https://www.googleapis.com/auth/spreadsheets"]
+        )
+        _auth_req = _gatr.Request()
+        _creds.refresh(_auth_req)
+
+        file_id  = st.secrets.get("GOOGLE_FILE_ID", "1ikdIp0wAtDD8B2PCDTc0X_cyxyXwaolLw_HTZtnT6No")
+        sheet_name = "AUDIT_LOG"
+        append_url = f"https://sheets.googleapis.com/v4/spreadsheets/{file_id}/values/{sheet_name}!A1:F1:append?valueInputOption=USER_ENTERED&insertDataOption=INSERT_ROWS"
+
+        _req.post(
+            append_url,
+            headers={"Authorization": f"Bearer {_creds.token}", "Content-Type": "application/json"},
+            json={"values": [row]},
+            timeout=10
+        )
+    except Exception:
+        pass  # Silent fail — never block the UI for logging
+
+
+def _log_page_visit(page_name: str):
+    """Log page navigation."""
+    _write_audit_log("PAGE_VISIT", f"Visited: {page_name}")
+
+
+def _log_ai_call(page: str, cost_usd: float):
+    """Log AI API call with cost."""
+    cost_rs = cost_usd * 280
+    _write_audit_log("AI_CALL", f"AI Insights on {page}", cost_rs)
+
+
+def _log_data_refresh():
+    """Log data refresh."""
+    _write_audit_log("DATA_REFRESH", "Manual data refresh triggered")
+
+
+def _log_audit_submission(tier: str, products: int, shrinkage_rs: float):
+    """Log physical audit submission."""
+    _write_audit_log("AUDIT_SUBMIT", f"Tier {tier} — {products} products counted — Shrinkage: Rs {shrinkage_rs:,.0f}")
+
 
 def global_filters(df, key_prefix, show_date=True, show_salesman=True, show_warehouse=True, show_inventory=False):
     dff = df.copy()
@@ -3249,4 +3323,151 @@ Be specific with rupee amounts. Use the actual brand names and product codes fro
 **Example output:**
 > *"Invest Rs 2.1M in OREAL CERAMICS 60x120 Polish — velocity 847 sqm/month, only 0.6 months stock left.*
 > *Liquidate CHINA dead stock first (Rs 3.2M recoverable at 70% WAC) to fund this without new capital outlay."*
+        """)
+
+elif page == "📋 Audit Log":
+    if not is_admin: st.error("Admin only."); st.stop()
+    st.title("📋 Audit Log")
+    st.caption("Complete record of all user activity — logins, page visits, AI calls, data refreshes, audit submissions")
+
+    tab1, tab2 = st.tabs(["📊 Current Session", "☁️ Full History (Google Sheets)"])
+
+    with tab1:
+        st.subheader("Current Session Activity")
+        session_log = st.session_state.get('audit_log', [])
+
+        if session_log:
+            log_df = pd.DataFrame(session_log,
+                columns=['Timestamp','User','Role','Event','Details','Cost'])
+            
+            # Summary metrics
+            c1,c2,c3,c4 = st.columns(4)
+            c1.metric("Total Events",    len(log_df))
+            c2.metric("AI Calls",        (log_df['Event']=='AI_CALL').sum())
+            c3.metric("Page Visits",     (log_df['Event']=='PAGE_VISIT').sum())
+            ai_costs = log_df[log_df['Event']=='AI_CALL']['Cost'].str.replace('Rs ','').str.replace('—','0').astype(float)
+            c4.metric("Total AI Cost",   f"Rs {ai_costs.sum():.1f}")
+
+            st.divider()
+
+            # Event type filter
+            evt_types = ['All'] + sorted(log_df['Event'].unique().tolist())
+            evt_f = st.selectbox("Filter by Event", evt_types, key="al_evt")
+            log_show = log_df if evt_f == 'All' else log_df[log_df['Event']==evt_f]
+
+            # Color code events
+            def color_event(val):
+                colors = {
+                    'LOGIN':        'background-color: #d4edda',
+                    'AI_CALL':      'background-color: #cce5ff',
+                    'DATA_REFRESH': 'background-color: #fff3cd',
+                    'AUDIT_SUBMIT': 'background-color: #f8d7da',
+                    'PAGE_VISIT':   '',
+                }
+                return colors.get(val, '')
+
+            st.dataframe(log_show, hide_index=True, use_container_width=True)
+            st.download_button(
+                "📥 Download Session Log",
+                log_show.to_csv(index=False),
+                f"audit_log_session_{datetime.now().strftime('%Y%m%d_%H%M')}.csv",
+                "text/csv", key="al_dl_session"
+            )
+        else:
+            st.info("No activity recorded yet in this session. Log entries appear as you use the dashboard.")
+
+    with tab2:
+        st.subheader("Full History from Google Sheets")
+        st.caption("All events since the AUDIT_LOG sheet was created. Persists across sessions and reboots.")
+
+        if st.button("📥 Load Full History", key="al_load_gs"):
+            with st.spinner("Loading audit history from Google Sheets..."):
+                try:
+                    import requests as _req
+                    from google.oauth2 import service_account as _sa
+                    import google.auth.transport.requests as _gatr
+
+                    _creds = _sa.Credentials.from_service_account_info(
+                        st.secrets["gcp_service_account"],
+                        scopes=["https://www.googleapis.com/auth/spreadsheets.readonly"]
+                    )
+                    _auth_req = _gatr.Request()
+                    _creds.refresh(_auth_req)
+
+                    file_id = st.secrets.get("GOOGLE_FILE_ID","1ikdIp0wAtDD8B2PCDTc0X_cyxyXwaolLw_HTZtnT6No")
+                    url = f"https://sheets.googleapis.com/v4/spreadsheets/{file_id}/values/AUDIT_LOG!A:F"
+                    resp = _req.get(
+                        url,
+                        headers={"Authorization": f"Bearer {_creds.token}"},
+                        timeout=15
+                    )
+                    data = resp.json()
+                    values = data.get('values', [])
+
+                    if len(values) > 1:
+                        gs_df = pd.DataFrame(values[1:], columns=['Timestamp','User','Role','Event','Details','Cost'])
+                        gs_df = gs_df.iloc[::-1].reset_index(drop=True)  # newest first
+
+                        # Metrics
+                        c1,c2,c3,c4 = st.columns(4)
+                        c1.metric("Total Events",   len(gs_df))
+                        c2.metric("Total Logins",   (gs_df['Event']=='LOGIN').sum())
+                        c3.metric("AI Calls",       (gs_df['Event']=='AI_CALL').sum())
+                        ai_costs_gs = gs_df[gs_df['Event']=='AI_CALL']['Cost'].str.replace('Rs ','').str.replace('—','0').astype(float, errors='ignore')
+                        c4.metric("Total AI Spend", f"Rs {pd.to_numeric(ai_costs_gs, errors='coerce').sum():.1f}")
+
+                        st.divider()
+
+                        # Filters
+                        c1,c2,c3 = st.columns(3)
+                        with c1:
+                            gs_evt = st.selectbox("Event Type", ['All']+sorted(gs_df['Event'].unique().tolist()), key="al_gs_evt")
+                        with c2:
+                            gs_user = st.selectbox("User", ['All']+sorted(gs_df['User'].unique().tolist()), key="al_gs_usr")
+                        with c3:
+                            gs_rows = st.selectbox("Show last N rows", [50,100,500,'All'], key="al_gs_n")
+
+                        gs_show = gs_df.copy()
+                        if gs_evt  != 'All': gs_show = gs_show[gs_show['Event']==gs_evt]
+                        if gs_user != 'All': gs_show = gs_show[gs_show['User']==gs_user]
+                        if gs_rows != 'All': gs_show = gs_show.head(int(gs_rows))
+
+                        st.caption(f"Showing {len(gs_show):,} of {len(gs_df):,} total events")
+                        st.dataframe(gs_show, hide_index=True, use_container_width=True)
+                        st.download_button(
+                            "📥 Download Full History",
+                            gs_show.to_csv(index=False),
+                            f"audit_log_full_{datetime.now().strftime('%Y%m%d')}.csv",
+                            "text/csv", key="al_dl_gs"
+                        )
+                    elif len(values) == 1:
+                        st.info("AUDIT_LOG sheet exists but has no entries yet. Activity will appear here after your next login.")
+                    else:
+                        st.warning("""AUDIT_LOG sheet not found in your Google Sheet.
+
+**Create it manually:**
+1. Open your Google Sheet
+2. Click the + button at the bottom to add a new sheet
+3. Name it exactly: `AUDIT_LOG`
+4. Add these headers in row 1: `Timestamp | User | Role | Event | Details | Cost`
+
+After that, all activity will be logged here automatically.""")
+
+                except Exception as e:
+                    st.error(f"Could not load from Google Sheets: {e}")
+
+        st.divider()
+        st.markdown("""
+**Events tracked:**
+
+| Event | Trigger |
+|-------|---------|
+| `LOGIN` | Every successful login |
+| `PAGE_VISIT` | Every page navigation |
+| `DATA_REFRESH` | Manual refresh button click |
+| `AI_CALL` | Every AI Insights generation |
+| `AUDIT_SUBMIT` | Physical count submitted |
+
+**Setup required:** Create an `AUDIT_LOG` tab in your Google Sheet with headers:
+`Timestamp`, `User`, `Role`, `Event`, `Details`, `Cost`
         """)
