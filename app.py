@@ -10,6 +10,11 @@ import smtplib
 import random
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
+try:
+    from anthropic import Anthropic as _AnthropicClient
+    _ANTHROPIC_AVAILABLE = True
+except ImportError:
+    _ANTHROPIC_AVAILABLE = False
 st.set_page_config(page_title="Mi-Tiles Intelligence", page_icon="🏠", layout="wide", initial_sidebar_state="expanded")
 
 DATA_PATH = st.secrets.get("DATA_PATH", r"C:\Users\hp\OneDrive\Desktop\5.3.25.xlsx")
@@ -65,7 +70,18 @@ If this was not you, change your password immediately.
 # LOGIN
 # ─────────────────────────────────────────────
 USERS = {
-    "hamza": {"password": st.secrets.get("PASS_HAMZA", ""), "role": "admin", "name": "Hamza"},
+    "hamza": {"password": st.secrets.get("PASS_HAMZA", ""),    "role": "admin",   "name": "Hamza"},
+    "staff": {"password": st.secrets.get("PASS_STAFF", ""),    "role": "staff",   "name": "Staff"},
+    "viewer":{"password": st.secrets.get("PASS_VIEWER", ""),   "role": "viewer",  "name": "Viewer"},
+}
+# Role permissions
+ROLE_PAGES = {
+    "admin":  "all",
+    "staff":  ["📊 Overview","📈 Sales Trends","🔴 Dead Stock","✅ Fast Movers",
+               "📦 Product Intelligence","🔍 Search","📦 Closing Stock","⚠️ Reorder Alerts",
+               "🔮 Demand Forecast","📊 Period Comparison"],
+    "viewer": ["📊 Overview","📈 Sales Trends","🔴 Dead Stock","✅ Fast Movers",
+               "📦 Product Intelligence","🔍 Search"],
 }
 
 def login():
@@ -441,7 +457,7 @@ with st.sidebar:
         for k in ['logged_in','user','role','name','last_active']: st.session_state.pop(k,None)
         st.rerun()
     st.divider()
-    page = st.radio("Navigate",[
+    _all_pages = [
         "📊 Overview","📈 Sales Trends","🔴 Dead Stock","✅ Fast Movers",
         "📦 Product Intelligence","🏭 Brand & Company","👤 Customer Intelligence",
         "💰 Margin Analysis","🧑‍💼 Salesman Performance","🎯 Incentive Calculator",
@@ -449,12 +465,13 @@ with st.sidebar:
         "📉 Sell Through","🔮 Demand Forecast","⚠️ Reorder Alerts",
         "📦 Stock Comparison","🔍 Search","📊 Period Comparison",
         "📦 Closing Stock","📋 Income Statement","🏦 Assets Position",
-        "📊 Salesman Rate Analysis",
-        "🤖 ML Model Health",
-        "🎨 Design Brief Tool",
-        "🔍 Product Audit",
-        "💡 Investment Advisor",
-    ], label_visibility="collapsed")
+        "📊 Salesman Rate Analysis","🤖 ML Model Health",
+        "🎨 Design Brief Tool","🔍 Product Audit","💡 Investment Advisor",
+    ]
+    _role = st.session_state.get('role','viewer')
+    _allowed = _all_pages if ROLE_PAGES.get(_role)=="all" else ROLE_PAGES.get(_role, _all_pages[:3])
+    _visible = [p for p in _all_pages if p in _allowed]
+    page = st.radio("Navigate", _visible, label_visibility="collapsed")
     st.divider()
     if st.button("🔄 Refresh Data"): st.cache_data.clear(); st.rerun()
     st.caption(f"Updated: {datetime.now().strftime('%d %b %Y %H:%M')}")
@@ -470,8 +487,14 @@ def ai_insights_button(data_summary: str, page_context: str, key: str):
     if st.button("🤖 Generate AI Insights", key=f"ai_{key}", help="Analyse current data and get actionable recommendations"):
         with st.spinner("Analysing data..."):
             try:
-                from anthropic import Anthropic
-                client = Anthropic(api_key=st.secrets.get("ANTHROPIC_API_KEY",""))
+                if not _ANTHROPIC_AVAILABLE:
+                    st.error("anthropic package not installed. Add 'anthropic' to requirements.txt")
+                    return
+                api_key = st.secrets.get("ANTHROPIC_API_KEY","")
+                if not api_key:
+                    st.error("ANTHROPIC_API_KEY not set in Streamlit secrets.")
+                    return
+                client = _AnthropicClient(api_key=api_key)
                 prompt = f"""You are a senior business analyst for Mi-Tiles, a tile and sanitary showroom on Ferozepur Road, Lahore, Pakistan.
 
 PAGE: {page_context}
@@ -2041,8 +2064,8 @@ Additional context: {supplier_note if supplier_note else 'None'}
 Return ONLY valid JSON, no other text."""
 
                 try:
-                    from anthropic import Anthropic
-                    client = Anthropic(api_key=st.secrets.get("ANTHROPIC_API_KEY",""))
+                    if not _ANTHROPIC_AVAILABLE: st.error('anthropic not installed'); st.stop()
+                    client = _AnthropicClient(api_key=st.secrets.get("ANTHROPIC_API_KEY",""))
                     response = client.messages.create(
                         model="claude-sonnet-4-6",
                         max_tokens=1000,
@@ -2149,8 +2172,8 @@ WHY THIS FILLS A GAP: [specific gap it fills based on the analysis above]
 Be specific and practical. These briefs will be sent directly to a Chinese tile manufacturer."""
 
                 try:
-                    from anthropic import Anthropic
-                    client = Anthropic(api_key=st.secrets.get("ANTHROPIC_API_KEY",""))
+                    if not _ANTHROPIC_AVAILABLE: st.error('anthropic not installed'); st.stop()
+                    client = _AnthropicClient(api_key=st.secrets.get("ANTHROPIC_API_KEY",""))
                     brief_response = client.messages.create(
                         model="claude-sonnet-4-6",
                         max_tokens=3000,
@@ -2360,8 +2383,8 @@ elif page == "📚 Document Chat (RAG)":
             with st.chat_message("assistant"):
                 with st.spinner("Reading documents and finding answer..."):
                     try:
-                        from anthropic import Anthropic
-                        client = Anthropic(api_key=st.secrets.get("ANTHROPIC_API_KEY",""))
+                        if not _ANTHROPIC_AVAILABLE: st.error('anthropic not installed - add to requirements.txt'); st.stop()
+                        client = _AnthropicClient(api_key=st.secrets.get("ANTHROPIC_API_KEY",""))
 
                         # Combine all document text
                         all_text = ""
@@ -3146,8 +3169,8 @@ DEAD STOCK BY BRAND (where capital is locked — consider liquidating to free bu
 {pi[pi['Inventory Status']=='Dead Stock'].groupby('Brand Name')['Stock Value PKR'].sum().nlargest(10).to_string()}
 """
             try:
-                from anthropic import Anthropic
-                client = Anthropic(api_key=st.secrets.get("ANTHROPIC_API_KEY",""))
+                if not _ANTHROPIC_AVAILABLE: st.error('anthropic not installed'); st.stop()
+                client = _AnthropicClient(api_key=st.secrets.get("ANTHROPIC_API_KEY",""))
 
                 prompt = f"""You are a senior inventory investment strategist for Mi-Tiles, a tile showroom in Lahore, Pakistan.
 
