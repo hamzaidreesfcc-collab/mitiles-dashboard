@@ -17,6 +17,21 @@ except ImportError:
     _ANTHROPIC_AVAILABLE = False
 st.set_page_config(page_title="Mi-Tiles Intelligence", page_icon="🏠", layout="wide", initial_sidebar_state="expanded")
 
+# ── PRIVATE ACCESS GATE ───────────────────────────────────
+_APP_TOKEN = st.secrets.get("APP_TOKEN", "")
+if _APP_TOKEN:
+    _url_token = st.query_params.get("token", "")
+    if _url_token != _APP_TOKEN:
+        st.markdown("""
+<div style='display:flex;flex-direction:column;align-items:center;justify-content:center;height:80vh'>
+    <h1 style='color:#ccc'>🔒</h1>
+    <h3 style='color:#666'>Access Restricted</h3>
+    <p style='color:#999'>This application is private.</p>
+</div>
+""", unsafe_allow_html=True)
+        st.stop()
+# ─────────────────────────────────────────────────────────
+
 DATA_PATH = st.secrets.get("DATA_PATH", r"C:\Users\hp\OneDrive\Desktop\5.3.25.xlsx")
 SESSION_TIMEOUT = 20 * 60
 LOCAL_ADJ       = 0.047
