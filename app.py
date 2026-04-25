@@ -460,6 +460,77 @@ def build_pairs(_df, _prod):
     return pairs, size_pairs
 
 # ─────────────────────────────────────────────
+# AUDIT LOG SYSTEM
+# ─────────────────────────────────────────────
+def _write_audit_log(event_type: str, details: str, cost_rs: float = 0.0):
+    """Write a single audit event to Google Sheets AUDIT_LOG tab and session state."""
+    import traceback
+    timestamp = datetime.now().strftime('%d-%m-%Y %H:%M:%S')
+    user = st.session_state.get('name', 'Unknown')
+    role = st.session_state.get('role', 'Unknown')
+    row = [timestamp, user, role, event_type, details, f"Rs {cost_rs:.1f}" if cost_rs > 0 else "—"]
+
+    # Add to session state log
+    if 'audit_log' not in st.session_state:
+        st.session_state['audit_log'] = []
+    st.session_state['audit_log'].insert(0, row)
+    if len(st.session_state['audit_log']) > 500:
+        st.session_state['audit_log'] = st.session_state['audit_log'][:500]
+
+    # Write to Google Sheets AUDIT_LOG tab — silent fail always
+    try:
+        import requests as _req
+        from google.oauth2 import service_account as _sa
+        import google.auth.transport.requests as _gatr
+
+        _creds = _sa.Credentials.from_service_account_info(
+            st.secrets["gcp_service_account"],
+            scopes=[
+                "https://www.googleapis.com/auth/spreadsheets",
+                "https://www.googleapis.com/auth/drive"
+            ]
+        )
+        _gatr.Request().refresh if hasattr(_gatr, 'Request') else None
+        _auth_req = _gatr.Request()
+        _creds.refresh(_auth_req)
+        file_id    = st.secrets.get("GOOGLE_FILE_ID","1ikdIp0wAtDD8B2PCDTc0X_cyxyXwaolLw_HTZtnT6No")
+        append_url = (
+            f"https://sheets.googleapis.com/v4/spreadsheets/{file_id}"
+            f"/values/AUDIT_LOG!A:F:append?valueInputOption=USER_ENTERED&insertDataOption=INSERT_ROWS"
+        )
+        _req.post(
+            append_url,
+            headers={"Authorization": f"Bearer {_creds.token}","Content-Type":"application/json"},
+            json={"values": [row]},
+            timeout=8
+        )
+    except Exception:
+        pass  # Always silent — logging must never crash the app
+
+
+def _log_page_visit(page_name: str):
+    """Log page navigation."""
+    _write_audit_log("PAGE_VISIT", f"Visited: {page_name}")
+
+
+def _log_ai_call(page: str, cost_usd: float):
+    """Log AI API call with cost."""
+    cost_rs = cost_usd * 280
+    _write_audit_log("AI_CALL", f"AI Insights on {page}", cost_rs)
+
+
+def _log_data_refresh():
+    """Log data refresh."""
+    _write_audit_log("DATA_REFRESH", "Manual data refresh triggered")
+
+
+def _log_audit_submission(tier: str, products: int, shrinkage_rs: float):
+    """Log physical audit submission."""
+    _write_audit_log("AUDIT_SUBMIT", f"Tier {tier} — {products} products counted — Shrinkage: Rs {shrinkage_rs:,.0f}")
+
+
+
+# ─────────────────────────────────────────────
 # LOAD
 # ─────────────────────────────────────────────
 with st.spinner("Loading Mi-Tiles data..."):
@@ -495,7 +566,10 @@ with st.sidebar:
     _visible = [p for p in _all_pages if p in _allowed]
     page = st.radio("Navigate", _visible, label_visibility="collapsed")
     st.divider()
-    if st.button("🔄 Refresh Data"): _log_data_refresh(); st.cache_data.clear(); st.rerun()
+    if st.button("🔄 Refresh Data"):
+        try: _log_data_refresh()
+        except: pass
+        st.cache_data.clear(); st.rerun()
     st.caption(f"Updated: {datetime.now().strftime('%d %b %Y %H:%M')}")
 
 # ─────────────────────────────────────────────
@@ -549,71 +623,6 @@ Use 🔴 for urgent, 🟡 for important, 🟢 for opportunity."""
                 st.error(f"AI Insights error: {e}")
                 if "api_key" in str(e).lower():
                     st.info("Add ANTHROPIC_API_KEY to Streamlit Cloud → Settings → Secrets")
-
-# ─────────────────────────────────────────────
-# AUDIT LOG SYSTEM
-# ─────────────────────────────────────────────
-def _write_audit_log(event_type: str, details: str, cost_rs: float = 0.0):
-    """Write a single audit event to Google Sheets AUDIT_LOG tab and session state."""
-    import traceback
-    timestamp = datetime.now().strftime('%d-%m-%Y %H:%M:%S')
-    user = st.session_state.get('name', 'Unknown')
-    role = st.session_state.get('role', 'Unknown')
-    row = [timestamp, user, role, event_type, details, f"Rs {cost_rs:.1f}" if cost_rs > 0 else "—"]
-
-    # Add to session state log
-    if 'audit_log' not in st.session_state:
-        st.session_state['audit_log'] = []
-    st.session_state['audit_log'].insert(0, row)
-    if len(st.session_state['audit_log']) > 500:
-        st.session_state['audit_log'] = st.session_state['audit_log'][:500]
-
-    # Write to Google Sheets AUDIT_LOG tab
-    try:
-        import requests as _req, io as _io
-        from google.oauth2 import service_account as _sa
-        import google.auth.transport.requests as _gatr
-
-        _creds = _sa.Credentials.from_service_account_info(
-            st.secrets["gcp_service_account"],
-            scopes=["https://www.googleapis.com/auth/spreadsheets"]
-        )
-        _auth_req = _gatr.Request()
-        _creds.refresh(_auth_req)
-
-        file_id  = st.secrets.get("GOOGLE_FILE_ID", "1ikdIp0wAtDD8B2PCDTc0X_cyxyXwaolLw_HTZtnT6No")
-        sheet_name = "AUDIT_LOG"
-        append_url = f"https://sheets.googleapis.com/v4/spreadsheets/{file_id}/values/{sheet_name}!A1:F1:append?valueInputOption=USER_ENTERED&insertDataOption=INSERT_ROWS"
-
-        _req.post(
-            append_url,
-            headers={"Authorization": f"Bearer {_creds.token}", "Content-Type": "application/json"},
-            json={"values": [row]},
-            timeout=10
-        )
-    except Exception:
-        pass  # Silent fail — never block the UI for logging
-
-
-def _log_page_visit(page_name: str):
-    """Log page navigation."""
-    _write_audit_log("PAGE_VISIT", f"Visited: {page_name}")
-
-
-def _log_ai_call(page: str, cost_usd: float):
-    """Log AI API call with cost."""
-    cost_rs = cost_usd * 280
-    _write_audit_log("AI_CALL", f"AI Insights on {page}", cost_rs)
-
-
-def _log_data_refresh():
-    """Log data refresh."""
-    _write_audit_log("DATA_REFRESH", "Manual data refresh triggered")
-
-
-def _log_audit_submission(tier: str, products: int, shrinkage_rs: float):
-    """Log physical audit submission."""
-    _write_audit_log("AUDIT_SUBMIT", f"Tier {tier} — {products} products counted — Shrinkage: Rs {shrinkage_rs:,.0f}")
 
 
 def global_filters(df, key_prefix, show_date=True, show_salesman=True, show_warehouse=True, show_inventory=False):
