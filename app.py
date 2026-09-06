@@ -514,7 +514,7 @@ def build_pi(_df, _prod):
         total_months = _df['Date'].dt.to_period('M').nunique()
         cons = sdays/total_months*100 if total_months>0 else 0
         xyz  = 'X' if cons>=cfg['xyz_x_pct'] else ('Y' if cons>=cfg['xyz_y_pct'] else 'Z')
-        results.append({'Product No.':prod_no,'Velocity Drop %':round(vel_drop_ts,1),'First Purchase Date':fp.date() if pd.notna(fp) else None,
+        results.append({'Product No.':prod_no,'Velocity Drop %':round(_vdrop, 1),'First Purchase Date':fp.date() if pd.notna(fp) else None,
             'Last Sale Date':ls.date() if pd.notna(ls) else None,'Days in Inventory':di,
             'Days Since Last Sale':ds,'Total Sales Sqm':round(ts,2),'Net Sales Sqm':round(ns,2),
             'Sales Last 30 Days':round(s30,2),'Sales Last 90 Days':round(s90,2),
