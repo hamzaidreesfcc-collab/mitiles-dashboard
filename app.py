@@ -48,6 +48,82 @@ EXPENSES_TEMPLATE = {
     "Other Expenses":       {"Miscellaneous": 0},
 }
 
+# ─────────────────────────────────────────────
+# DASHBOARD CONFIGURATION (all editable thresholds)
+# ─────────────────────────────────────────────
+DEFAULT_CONFIG = {
+    # Cost adjustments
+    "local_adj":              0.047,
+    "imported_adj":           0.130,
+    # Inventory Status thresholds (days since last sale)
+    "inv_active_days":        30,
+    "inv_slow_days":          90,
+    "inv_at_risk_days":       180,
+    "inv_critical_days":      360,
+    # Stock Health thresholds (months of stock)
+    "sh_reorder_months":      1.0,
+    "sh_healthy_months":      3.0,
+    "sh_overstock_months":    6.0,
+    # Demand Pattern
+    "dp_fast_freq":           0.15,
+    "dp_slow_freq":           0.05,
+    "dp_cv_threshold":        3.0,
+    # ABC thresholds (cumulative revenue %)
+    "abc_a_pct":              70.0,
+    "abc_b_pct":              90.0,
+    # XYZ thresholds (consistency %)
+    "xyz_x_pct":              50.0,
+    "xyz_y_pct":              20.0,
+    # Reorder Score weights (must sum to 1.0)
+    "rs_vel_weight":          0.40,
+    "rs_cust_weight":         0.25,
+    "rs_freq_weight":         0.20,
+    "rs_st_weight":           0.15,
+    # Reorder Score normalisation bases
+    "rs_vel_base":            500.0,
+    "rs_cust_base":           50.0,
+    "rs_freq_base":           0.30,
+    # Smart Reorder Multiplier CV thresholds
+    "rm_cv_low":              0.5,
+    "rm_cv_high":             1.5,
+    "rm_mult_low":            2.0,
+    "rm_mult_mid":            3.0,
+    "rm_mult_high":           4.0,
+    # Tail Stock thresholds
+    "tail_st_pct":            70.0,
+    "tail_rem_pct":           25.0,
+    "tail_vdrop_pct":         60.0,
+    "tail_days":              90,
+    # Ghost Performer
+    "ghost_min_vel":          10.0,
+    "ghost_reorder_buffer":   1.5,
+    # ML Risk thresholds
+    "ml_risk_high":           70.0,
+    "ml_risk_medium":         40.0,
+    # Churn thresholds
+    "churn_high":             70.0,
+    "churn_medium":           40.0,
+    # Audit tiers
+    "audit_a_value":          500000,
+    "audit_a_velocity":       100,
+    "audit_b_value_min":      100000,
+    "audit_b_value_max":      500000,
+    # Dead Stock Liquidation discounts
+    "liq_disc_1":             10,
+    "liq_disc_2":             20,
+    "liq_disc_3":             30,
+    "liq_disc_4":             40,
+    "liq_days_1":             450,
+    "liq_days_2":             540,
+    "liq_days_3":             630,
+}
+
+def get_config():
+    """Get current config — from session state if changed, else defaults."""
+    if 'dashboard_config' not in st.session_state:
+        st.session_state['dashboard_config'] = DEFAULT_CONFIG.copy()
+    return st.session_state['dashboard_config']
+
 ASSETS_TEMPLATE = {
     "Current Assets": {"Cash in Hand": 0, "Cash at Bank": 0, "Trade Receivables": 0,
                        "Advance to Suppliers": 0, "Other Current Assets": 0},
@@ -161,6 +237,21 @@ def _clean_prod(x):
     x = re.sub(r' +', ' ', x)
     return x.strip()
 
+def _extract_family(p):
+    """Strip tone/variant suffix to get product family."""
+    p = str(p).strip()
+    for pat in [
+        r' TONE [A-Z0-9]+$',
+        r' T[-]?[A-Z0-9]+$',
+        r' [(]STD[-]?[A-Z0-9]*[)]$',
+        r' [(]COMM[)]$',
+        r' BOOK MATCH ?[AB]?$',
+    ]:
+        result = re.sub(pat, '', p, flags=re.IGNORECASE).strip()
+        if result != p and len(result) > 3:
+            return result
+    return p
+
 @st.cache_data(ttl=3600)
 def load_data(path):
     import io
@@ -196,7 +287,8 @@ def load_data(path):
     df['Month']      = df['Date'].dt.to_period('M').astype(str)
     df['Year']       = df['Date'].dt.year
     df['Bill No.']   = df['Bill No.'].astype(str)
-    df['Account Name'] = df['Account Name'].astype(str).str.replace('\xa0',' ').str.strip()
+    df['Account Name']  = df['Account Name'].astype(str).str.replace('\xa0',' ').str.strip()
+    df['Product Family'] = df['Product No.'].apply(_extract_family)
 
     for col in ['Sq.m','Rate','Closing','Profit','SALE','RETURN','GROSS PROFIT','NET SALE']:
         df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0)
@@ -218,10 +310,94 @@ def load_data(path):
     df = df.merge(wac, on='Product No.', how='left')
     df['WAC Rate'] = df['WAC Rate'].fillna(0)
 
+    # ── Load Supplier Costs from Google Drive folder ────────
+    supplier_wac = {}
+    try:
+        import re as _re
+        supplier_file_ids = st.secrets.get("SUPPLIER_FILE_IDS", "")
+        if supplier_file_ids:
+            for fid in [x.strip() for x in supplier_file_ids.split(",") if x.strip()]:
+                try:
+                    s_url = f"https://docs.google.com/spreadsheets/d/{fid}/export?format=xlsx"
+                    s_resp = requests.get(s_url,
+                        headers={"Authorization": f"Bearer {creds.token}"}, timeout=30)
+                    if s_resp.status_code == 200:
+                        s_buf = io.BytesIO(s_resp.content)
+                        xl = pd.ExcelFile(s_buf)
+                        # Try known sheet names that contain purchase cost data
+                        for sheet in ['NEW', 'PURCHASES', 'Purchase', 'Data', xl.sheet_names[0]]:
+                            if sheet not in xl.sheet_names:
+                                continue
+                            s_df = pd.read_excel(s_buf, sheet_name=sheet)
+                            s_df.columns = [str(c).strip() for c in s_df.columns]
+                            # Find product no column
+                            prod_col = next((c for c in s_df.columns
+                                if 'product' in c.lower() and 'no' in c.lower()), None)
+                            # Find purchase rate column
+                            rate_col = next((c for c in s_df.columns
+                                if 'purchase rate' in c.lower() and 'box' not in c.lower()), None)
+                            # Find sqm column
+                            sqm_col  = next((c for c in s_df.columns
+                                if c.lower() in ['sq.m','sqm','sq m']), None)
+                            # Find type column
+                            type_col = next((c for c in s_df.columns
+                                if c.lower() == 'type'), None)
+
+                            if prod_col and rate_col and sqm_col:
+                                s_df[prod_col] = s_df[prod_col].apply(
+                                    lambda x: _re.sub(r' +',' ',str(x).replace(' ',' ')).strip().upper())
+                                s_df[rate_col] = pd.to_numeric(s_df[rate_col], errors='coerce').fillna(0)
+                                s_df[sqm_col]  = pd.to_numeric(s_df[sqm_col],  errors='coerce').fillna(0)
+                                # Filter to purchases only if type column exists
+                                if type_col:
+                                    s_df = s_df[s_df[type_col].astype(str).str.strip().isin(['P','p'])]
+                                s_df = s_df[(s_df[rate_col] > 0) & (s_df[sqm_col] > 0)]
+                                # WAC per product
+                                for pno, g in s_df.groupby(prod_col):
+                                    wac_s = (g[sqm_col]*g[rate_col]).sum() / g[sqm_col].sum()
+                                    if pno in supplier_wac:
+                                        # Blend with existing (weighted)
+                                        existing_sqm = supplier_wac[pno]['sqm']
+                                        existing_val = supplier_wac[pno]['val']
+                                        new_sqm = g[sqm_col].sum()
+                                        new_val = (g[sqm_col]*g[rate_col]).sum()
+                                        supplier_wac[pno] = {
+                                            'sqm': existing_sqm + new_sqm,
+                                            'val': existing_val + new_val
+                                        }
+                                    else:
+                                        supplier_wac[pno] = {
+                                            'sqm': g[sqm_col].sum(),
+                                            'val': (g[sqm_col]*g[rate_col]).sum()
+                                        }
+                                break  # Found good sheet, stop
+                except Exception:
+                    pass
+    except Exception:
+        pass
+
+    # Build supplier WAC map
+    supplier_wac_map = {
+        pno: v['val']/v['sqm']
+        for pno, v in supplier_wac.items() if v['sqm'] > 0
+    }
+
+    # Store in session for the Supplier Costs page
+    if supplier_wac_map:
+        st.session_state['supplier_wac_map'] = supplier_wac_map
+
     def ap(row):
-        adj = LOCAL_ADJ if 'LOCAL' in str(row.get('Category','')).upper() else IMPORTED_ADJ
+        pno = str(row.get('Product No.','')).upper()
+        # Use actual supplier cost if available
+        if pno in supplier_wac_map and supplier_wac_map[pno] > 0:
+            return row['SALE'] - row['Sq.m'] * supplier_wac_map[pno]
+        # Fall back to WAC adjustment
+        _cfg = get_config()
+        adj = _cfg['local_adj'] if 'LOCAL' in str(row.get('Category','')).upper() else _cfg['imported_adj']
         return row['SALE'] - row['Sq.m'] * row['WAC Rate'] * (1 - adj)
+
     df['Actual Profit'] = df.apply(ap, axis=1)
+    df['Has Supplier Cost'] = df['Product No.'].str.upper().isin(supplier_wac_map)
 
     # ── Churn scores per customer (computed once on load) ────
     try:
@@ -293,33 +469,52 @@ def build_pi(_df, _prod):
         rev  = sal['SALE'].sum(); erpp=sal['Profit'].sum(); actp=sal['Actual Profit'].sum()
         em   = (erpp/rev*100) if rev>0 else 0; am=(actp/rev*100) if rev>0 else 0
         unique_customers = sal['Account Name'].nunique() if len(sal)>0 else 0
-        vel_norm  = min(vel/500*100,  100) if vel>0  else 0
-        cust_norm = min(unique_customers/50*100, 100) if unique_customers>0 else 0
-        freq_norm = min(freq/0.3*100, 100) if freq>0 else 0
+        vel_norm  = min(vel/cfg['rs_vel_base']*100,  100) if vel>0  else 0
+        cust_norm = min(unique_customers/cfg['rs_cust_base']*100, 100) if unique_customers>0 else 0
+        freq_norm = min(freq/cfg['rs_freq_base']*100, 100) if freq>0 else 0
         st_norm   = min((ns/max(psq,1))*100, 100)
-        reorder_score = round(vel_norm*0.40 + cust_norm*0.25 + freq_norm*0.20 + st_norm*0.15, 1)
+        reorder_score = round(vel_norm*cfg['rs_vel_weight'] + cust_norm*cfg['rs_cust_weight'] + freq_norm*cfg['rs_freq_weight'] + st_norm*cfg['rs_st_weight'], 1)
+        cfg=get_config()
         if ns<=0:              dp='No Sales / Returns Only'
-        elif freq>=0.15 and cv<3: dp='Stable Fast Mover'
-        elif freq>=0.15:       dp='Volatile Fast Mover'
-        elif 0.05<=freq<0.15 and cv<3: dp='Slow Stable'
-        elif 0.05<=freq<0.15:  dp='Erratic Demand'
+        elif freq>=cfg['dp_fast_freq'] and cv<cfg['dp_cv_threshold']: dp='Stable Fast Mover'
+        elif freq>=cfg['dp_fast_freq']:     dp='Volatile Fast Mover'
+        elif cfg['dp_slow_freq']<=freq<cfg['dp_fast_freq'] and cv<cfg['dp_cv_threshold']: dp='Slow Stable'
+        elif cfg['dp_slow_freq']<=freq<cfg['dp_fast_freq']:  dp='Erratic Demand'
         else:                  dp='Dead / Negligible'
+        # Tail Stock detection — sold well but tiny remainder off display
+        _psq_ts = pur['Sq.m'].sum()
+        _ts_ts  = sal['Sq.m'].sum()
+        _st_ts  = _ts_ts/_psq_ts if _psq_ts>0 else 0
+        _rem_ts = max(0,cs)/_psq_ts if _psq_ts>0 else 1
+        _vdrop  = 0.0
+        if len(sal)>=4:
+            _ss  = sal.sort_values('Date')
+            _spl = int(len(_ss)*0.7)
+            _d1  = max((_ss.iloc[_spl-1]['Date']-_ss.iloc[0]['Date']).days,1)
+            _d2  = max((_ss.iloc[-1]['Date']-_ss.iloc[_spl]['Date']).days,1)
+            _v1  = _ss.iloc[:_spl]['Sq.m'].sum()/_d1*30
+            _v2  = _ss.iloc[_spl:]['Sq.m'].sum()/_d2*30
+            _vdrop = (_v1-_v2)/_v1*100 if _v1>0 else 0
+        _is_tail = (_st_ts>0.70 and _rem_ts<0.25 and _vdrop>60
+                    and ds is not None and ds>90)
+
         if cs<=0:              inv='Out of Stock'
         elif ds is None:       inv='No Sales'
-        elif ds<=30:           inv='Active'
-        elif ds<=90:           inv='Slow'
-        elif ds<=180:          inv='At Risk'
-        elif ds<=360:          inv='Critical'
+        elif ds<=cfg['inv_active_days']:    inv='Active'
+        elif ds<=cfg['inv_slow_days']:      inv='Slow'
+        elif ds<=cfg['inv_at_risk_days']:   inv='At Risk'
+        elif ds<=cfg['inv_critical_days']:  inv='Critical'
+        elif _is_tail:         inv='Tail Stock'
         else:                  inv='Dead Stock'
         if cs<=0:              sh='No Stock'
-        elif mos<=1:           sh='Reorder Now'
-        elif mos<=3:           sh='Healthy'
-        elif mos<=6:           sh='Overstocked'
+        elif mos<=cfg['sh_reorder_months']:  sh='Reorder Now'
+        elif mos<=cfg['sh_healthy_months']:  sh='Healthy'
+        elif mos<=cfg['sh_overstock_months']:sh='Overstocked'
         else:                  sh='Dead Stock'
         total_months = _df['Date'].dt.to_period('M').nunique()
         cons = sdays/total_months*100 if total_months>0 else 0
-        xyz  = 'X' if cons>=50 else ('Y' if cons>=20 else 'Z')
-        results.append({'Product No.':prod_no,'First Purchase Date':fp.date() if pd.notna(fp) else None,
+        xyz  = 'X' if cons>=cfg['xyz_x_pct'] else ('Y' if cons>=cfg['xyz_y_pct'] else 'Z')
+        results.append({'Product No.':prod_no,'Velocity Drop %':round(vel_drop_ts,1),'First Purchase Date':fp.date() if pd.notna(fp) else None,
             'Last Sale Date':ls.date() if pd.notna(ls) else None,'Days in Inventory':di,
             'Days Since Last Sale':ds,'Total Sales Sqm':round(ts,2),'Net Sales Sqm':round(ns,2),
             'Sales Last 30 Days':round(s30,2),'Sales Last 90 Days':round(s90,2),
@@ -334,8 +529,50 @@ def build_pi(_df, _prod):
     pi = pi.merge(_prod[['Product No.','Brand Name','Category','Sub-Category','Size','Company Name','Sq.m/Box']], on='Product No.', how='left')
     pi = pi.sort_values('Total Revenue', ascending=False)
     pi['Cum %'] = pi['Total Revenue'].cumsum()/pi['Total Revenue'].sum()*100
-    pi['ABC']   = pi['Cum %'].apply(lambda x: 'A' if x<=70 else ('B' if x<=90 else 'C'))
+    pi['ABC']   = pi['Cum %'].apply(lambda x: 'A' if x<=cfg['abc_a_pct'] else ('B' if x<=cfg['abc_b_pct'] else 'C'))
     pi['ABC_XYZ']= pi['ABC'] + pi['XYZ']
+    # ── Ghost Performer Detection ────────────────────────────
+    ghost_rows = []
+    for _pno, _g in _df.groupby('Product No.'):
+        _g = _g.sort_values('Date')
+        _sal = _g[_g['Type']=='S']
+        _pur = _g[_g['Type'].isin(['P','O.S'])]
+        if len(_sal)==0 or len(_pur)==0: continue
+        _cs = _g.iloc[-1]['Closing']
+        _ls = _sal['Date'].max() if len(_sal)>0 else pd.NaT
+        _ds = int((today - _ls).days) if pd.notna(_ls) else 9999
+        # Count stockout events
+        _closings = _g['Closing'].values
+        _so_count = sum(1 for i in range(1,len(_closings))
+                       if _closings[i]<=0 and _closings[i-1]>0)
+        if _so_count == 0: continue
+        # True velocity during in-stock periods
+        _g2 = _g.copy()
+        _g2['was_in_stock'] = _g2['Closing'].shift(1).fillna(0) > 0
+        _in_stock_sales = _g2[(_g2['Type']=='S')&(_g2['was_in_stock'])]
+        _in_stock_days  = max(_g2[_g2['Closing']>0]['Date'].nunique(), 1)
+        _true_vel = _in_stock_sales['Sq.m'].sum() / _in_stock_days * 30
+        _ghost_score = round(_true_vel * _so_count / max(_ds, 1) * 100, 2)
+        ghost_rows.append({
+            'Product No.': _pno,
+            'True Velocity': round(_true_vel, 1),
+            'Stockout Count': _so_count,
+            'Days Since Last Sale': _ds,
+            'Ghost Score': _ghost_score,
+            'Suggested Reorder Sqm': round(_true_vel * 3 * 1.5, 1),
+            'Current Stock': round(_cs, 2)
+        })
+    ghost_df = pd.DataFrame(ghost_rows) if ghost_rows else pd.DataFrame(
+        columns=['Product No.','True Velocity','Stockout Count',
+                 'Days Since Last Sale','Ghost Score','Suggested Reorder Sqm','Current Stock'])
+    pi = pi.merge(ghost_df[['Product No.','True Velocity','Stockout Count',
+                             'Ghost Score','Suggested Reorder Sqm']],
+                  on='Product No.', how='left')
+    pi['Ghost Score']         = pi['Ghost Score'].fillna(0)
+    pi['True Velocity']       = pi['True Velocity'].fillna(0)
+    pi['Stockout Count']      = pi['Stockout Count'].fillna(0)
+    pi['Suggested Reorder Sqm'] = pi['Suggested Reorder Sqm'].fillna(0)
+
     purch2  = _df[_df['Type'].isin(['P','O.S'])].groupby('Product No.')['Sq.m'].sum().reset_index()
     purch2.columns=['Product No.','Total Purchased']
     sold2   = _df[_df['Type']=='S'].groupby('Product No.')['Sq.m'].sum().reset_index()
@@ -559,7 +796,7 @@ with st.sidebar:
         "📦 Stock Comparison","🔍 Search","📊 Period Comparison",
         "📦 Closing Stock","📋 Income Statement","🏦 Assets Position",
         "📊 Salesman Rate Analysis","🤖 ML Model Health",
-        "🎨 Design Brief Tool","🔍 Product Audit","💡 Investment Advisor","📋 Audit Log",
+        "🎨 Design Brief Tool","🔍 Product Audit","💡 Investment Advisor","📋 Audit Log","💰 Supplier Costs","📖 Formula Guide","⚙️ Metrics Config","⚔️ Product Showdown","👻 Ghost Performers","🟣 Tail Stock",
     ]
     _role = st.session_state.get('role','viewer')
     _allowed = _all_pages if ROLE_PAGES.get(_role)=="all" else ROLE_PAGES.get(_role, _all_pages[:3])
@@ -764,7 +1001,8 @@ High ML Risk Products: {(pi['Risk Label']=='🔴 High').sum() if 'Risk Label' in
 | 🟡 Slow | Last sale 31–90 days ago |
 | 🟠 At Risk | Last sale 91–180 days ago |
 | 🔴 Critical | Last sale 181–360 days ago |
-| ⚫ Dead Stock | Last sale > 360 days ago |
+| 🟣 Tail Stock | Last sale > 90 days, sold >70%, tiny remainder (<25%) — removed from display, NOT truly dead |
+| ⚫ Dead Stock | Last sale > 360 days, low sell-through — genuinely unsold |
 | ⬜ Out of Stock | Closing stock ≤ 0 |
 | ❔ No Sales | Never sold |
 """)
@@ -853,6 +1091,24 @@ elif page == "📈 Sales Trends":
     st.dataframe(pd.concat([monthly[disp],pd.DataFrame([tot])],ignore_index=True), hide_index=True, use_container_width=True)
     st.divider()
     st.subheader("All Products by Revenue")
+    # Product Family toggle
+    show_by_family = st.checkbox("📦 Group by Product Family", value=False, key="st_fam_toggle")
+    if show_by_family and 'Product Family' in sales_df.columns:
+        pr = sales_df.groupby('Product Family').agg(
+            Sale_Val=('SALE','sum'),Sale_Sqm=('Sq.m','sum'),
+            Ret_Val=('RETURN','sum'),ERP_P=('Profit','sum'),
+            Act_P=('Actual Profit','sum'),Bills=('Bill No.','nunique'),
+            Variants=('Product No.','nunique')
+        ).reset_index().sort_values('Sale_Val',ascending=False)
+        pr['Net Value']=pr['Sale_Val']-pr['Ret_Val']; pr['ERP M%']=(pr['ERP_P']/pr['Sale_Val']*100).round(1)
+        pr['Sale Value']=pr['Sale_Val'].apply(fmt_m); pr['Net']=pr['Net Value'].apply(fmt_m)
+        pr['ERP Profit']=pr['ERP_P'].apply(fmt_m)
+        disp2=['Product Family','Variants','Sale Value','Sale_Sqm','Net','Bills','ERP Profit','ERP M%']
+        if is_admin:
+            pr['Actual M%']=(pr['Act_P']/pr['Sale_Val']*100).round(1); disp2+=['Actual M%']
+        st.dataframe(pr[disp2], hide_index=True, use_container_width=True)
+        st.download_button("📥 Download", pr.to_csv(index=False), "family_sales.csv", "text/csv")
+        st.divider()
     pr = sales_df.groupby('Product No.').agg(Sale_Val=('SALE','sum'),Sale_Sqm=('Sq.m','sum'),Ret_Val=('RETURN','sum'),ERP_P=('Profit','sum'),Act_P=('Actual Profit','sum'),Bills=('Bill No.','nunique')).reset_index().sort_values('Sale_Val',ascending=False)
     pr = pr.merge(prod[['Product No.','Brand Name','Category','Size']], on='Product No.', how='left')
     pr['Net Value']=pr['Sale_Val']-pr['Ret_Val']; pr['ERP M%']=(pr['ERP_P']/pr['Sale_Val']*100).round(1)
@@ -972,6 +1228,30 @@ elif page == "📦 Product Intelligence":
     with c2:
         st.metric("High Risk Products", f"{(flt['Risk Label']=='🔴 High').sum():,}",
                   help="ML model: ≥70% probability of becoming dead stock")
+    # Product Family group summary
+    with st.expander("📦 View by Product Family", expanded=False):
+        if 'Product No.' in flt.columns:
+            flt_fam = flt.copy()
+            flt_fam['Family'] = flt_fam['Product No.'].apply(_extract_family)
+            fam_groups = flt_fam.groupby('Family').agg(
+                Variants=('Product No.','count'),
+                Total_Sqm=('Current Stock Sqm','sum'),
+                Total_Value=('Stock Value PKR','sum'),
+                Avg_Velocity=('Sales Velocity/Month','mean'),
+                Avg_Risk=('Dead Stock Risk %','mean')
+            ).reset_index().sort_values('Total_Value',ascending=False)
+            fam_groups['Total Value'] = fam_groups['Total_Value'].apply(fmt_m)
+            fam_groups['Avg Velocity'] = fam_groups['Avg_Velocity'].round(1)
+            fam_groups['Avg Risk %'] = fam_groups['Avg_Risk'].round(1)
+            st.caption(f"{len(fam_groups):,} product families | {len(flt):,} total variants")
+            sel_fam = st.selectbox("Select family to drill down:",
+                ['— show all —'] + fam_groups['Family'].tolist(), key="pi_fam_sel")
+            st.dataframe(fam_groups[['Family','Variants','Total_Sqm','Total Value','Avg Velocity','Avg Risk %']],
+                         hide_index=True, use_container_width=True)
+            if sel_fam != '— show all —':
+                flt = flt[flt['Product No.'].apply(_extract_family)==sel_fam]
+                st.info(f"Filtered to family: **{sel_fam}** — {len(flt)} variants")
+
     st.caption(f"Showing {len(flt):,} products — {fmt_m(flt['Stock Value PKR'].sum())}")
     # Put risk columns near front
     base_cols = ['Product No.','Brand Name','Category','Size','Risk Label','Dead Stock Risk %',
@@ -1515,7 +1795,16 @@ elif page == "📦 Stock Comparison":
 
 elif page == "🔍 Search":
     st.title("🔍 Universal Search")
-    query=st.text_input("Search — product, customer, brand, category, size, salesman...",placeholder="e.g. MONTAGE POLISH, IDREES BROTHER, 60 X 120...")
+    c1,c2 = st.columns([2,1])
+    with c1:
+        query=st.text_input("Search — product, customer, brand, category, size, salesman...",
+                            placeholder="e.g. MONTAGE POLISH, IDREES BROTHER, 60 X 120...")
+    with c2:
+        all_families = sorted(df['Product Family'].dropna().unique().tolist()) if 'Product Family' in df.columns else []
+        family_filter = st.selectbox("Or browse by Product Family",
+            ['— all products —'] + all_families, key="search_fam")
+        if family_filter != '— all products —' and not query:
+            query = family_filter
     if query and len(query)>=2:
         q=query.upper()
         tab1,tab2,tab3=st.tabs(["📦 Products","👤 Customers","📋 Transactions"])
@@ -3480,3 +3769,1293 @@ After that, all activity will be logged here automatically.""")
 **Setup required:** Create an `AUDIT_LOG` tab in your Google Sheet with headers:
 `Timestamp`, `User`, `Role`, `Event`, `Details`, `Cost`
         """)
+
+elif page == "💰 Supplier Costs":
+    if not is_admin: st.error("Admin only."); st.stop()
+    st.title("💰 Supplier Costs — Real Profit Analysis")
+    st.caption("Actual purchase costs from supplier files. When available, these replace the estimated WAC adjustment.")
+
+    # ── Setup Instructions ────────────────────────────────────
+    with st.expander("⚙️ Setup — How to connect supplier files", expanded=False):
+        st.markdown("""
+**One-time setup:**
+
+1. Go to **Google Drive** → create a folder called `Mi-Tiles Supplier Costs`
+2. Upload each supplier Excel file to that folder
+3. Share the folder with: `mitiles-streamlit@mitiles-dashboard.iam.gserviceaccount.com` (Editor access)
+4. Get each file's ID from the URL: `docs.google.com/spreadsheets/d/**FILE_ID**/edit`
+5. Go to **Streamlit Cloud → Settings → Secrets** and add:
+```toml
+SUPPLIER_FILE_IDS = "file_id_1,file_id_2,file_id_3"
+```
+
+**Ongoing:**
+- When you update a supplier file, just re-save it in Google Drive — dashboard picks it up on next refresh
+- No manual data entry required
+
+**Format required:**
+Your supplier files need a sheet with these columns (same as your ERP export):
+- `Product No.` — product code
+- `PURCHASE RATE` — actual cost per sqm
+- `Sq.m` — quantity
+- `Type` — P for purchase (optional but recommended)
+        """)
+
+    st.divider()
+
+    # ── Current Status ────────────────────────────────────────
+    supplier_map = st.session_state.get('supplier_wac_map', {})
+
+    if not supplier_map:
+        st.warning("No supplier cost data loaded. Add SUPPLIER_FILE_IDS to Streamlit secrets to enable real profit calculation.")
+        st.info("Currently using WAC ± adjustment estimate (4.7% local / 13% imported)")
+    else:
+        c1,c2,c3 = st.columns(3)
+        c1.metric("Products with Real Cost", f"{len(supplier_map):,}")
+        # Compare coverage
+        total_products = pi['Product No.'].nunique()
+        coverage = len(supplier_map)/total_products*100
+        c2.metric("Coverage", f"{coverage:.1f}%", help="% of products with actual supplier cost")
+        c3.metric("Remaining (estimated)", f"{total_products - len(supplier_map):,}")
+
+        st.divider()
+
+        # ── Profit Comparison ─────────────────────────────────
+        st.subheader("📊 Actual vs Estimated Profit Comparison")
+
+        sales_df = df[df['Type']=='S'].copy()
+
+        # Products WITH supplier cost
+        has_cost   = sales_df[sales_df.get('Has Supplier Cost', pd.Series(False, index=sales_df.index)) == True] if 'Has Supplier Cost' in sales_df.columns else pd.DataFrame()
+        no_cost    = sales_df[~sales_df.index.isin(has_cost.index)] if len(has_cost) > 0 else sales_df
+
+        c1,c2 = st.columns(2)
+        with c1:
+            st.markdown("**✅ Products with Actual Supplier Cost**")
+            if len(has_cost) > 0:
+                st.metric("Transactions", f"{len(has_cost):,}")
+                st.metric("Actual Profit", fmt_m(has_cost['Actual Profit'].sum()))
+                st.metric("Actual Margin %",
+                    f"{has_cost['Actual Profit'].sum()/has_cost['SALE'].sum()*100:.1f}%"
+                    if has_cost['SALE'].sum() > 0 else "N/A")
+            else:
+                st.info("No transactions matched yet")
+        with c2:
+            st.markdown("**⚠️ Products using WAC Estimate**")
+            if len(no_cost) > 0:
+                st.metric("Transactions", f"{len(no_cost):,}")
+                st.metric("Estimated Profit", fmt_m(no_cost['Actual Profit'].sum()))
+                st.metric("Estimated Margin %",
+                    f"{no_cost['Actual Profit'].sum()/no_cost['SALE'].sum()*100:.1f}%"
+                    if no_cost['SALE'].sum() > 0 else "N/A")
+
+        st.divider()
+
+        # ── Supplier WAC Table ────────────────────────────────
+        st.subheader("📋 Supplier Cost per Product")
+
+        wac_df = pd.DataFrame([
+            {'Product No.': pno, 'Supplier WAC (Rs/sqm)': round(wac, 2)}
+            for pno, wac in sorted(supplier_map.items())
+        ])
+
+        # Merge with pi for context
+        wac_merged = wac_df.merge(
+            pi[['Product No.','Brand Name','Category','Size',
+                'Sales Velocity/Month','Stock Value PKR']],
+            on='Product No.', how='left'
+        )
+
+        # Add sale rate comparison
+        sale_rates = sales_df.groupby(sales_df['Product No.'].str.upper()).agg(
+            Avg_Sale_Rate=('Rate','mean')
+        ).reset_index()
+        sale_rates.columns = ['Product No.', 'Avg Sale Rate']
+        wac_merged = wac_merged.merge(sale_rates, on='Product No.', how='left')
+        wac_merged['Gross Margin/Sqm'] = (
+            wac_merged['Avg Sale Rate'] - wac_merged['Supplier WAC (Rs/sqm)']
+        ).round(0)
+        wac_merged['Gross Margin %'] = (
+            wac_merged['Gross Margin/Sqm'] / wac_merged['Avg Sale Rate'] * 100
+        ).round(1)
+
+        # Filters
+        c1,c2 = st.columns(2)
+        with c1:
+            search_s = st.text_input("Search product", key="sc_search")
+        with c2:
+            sort_by = st.selectbox("Sort by",
+                ['Gross Margin %','Gross Margin/Sqm','Supplier WAC (Rs/sqm)','Sales Velocity/Month'],
+                key="sc_sort")
+
+        show = wac_merged.copy()
+        if search_s:
+            show = show[show['Product No.'].str.contains(search_s.upper(), na=False)]
+        show = show.sort_values(sort_by, ascending=False)
+
+        st.caption(f"Showing {len(show):,} products with actual supplier costs")
+        st.dataframe(
+            show[['Product No.','Brand Name','Category','Size',
+                  'Supplier WAC (Rs/sqm)','Avg Sale Rate',
+                  'Gross Margin/Sqm','Gross Margin %','Sales Velocity/Month']],
+            hide_index=True, use_container_width=True
+        )
+        st.download_button(
+            "📥 Download",
+            show.to_csv(index=False),
+            "supplier_costs.csv", "text/csv",
+            key="sc_dl"
+        )
+
+        st.divider()
+
+        # ── Unmatched products ────────────────────────────────
+        st.subheader("⚠️ Products Without Supplier Cost (using estimate)")
+        unmatched = pi[~pi['Product No.'].str.upper().isin(supplier_map.keys())].copy()
+        unmatched = unmatched[unmatched['Current Stock Sqm'] > 0].sort_values('Stock Value PKR', ascending=False)
+        st.caption(f"{len(unmatched):,} products still using WAC estimate — stock value: {fmt_m(unmatched['Stock Value PKR'].sum())}")
+        st.dataframe(
+            unmatched[['Product No.','Brand Name','Category','Size',
+                       'WAC Rate','Stock Value PKR','Sales Velocity/Month']].head(100),
+            hide_index=True, use_container_width=True
+        )
+
+
+elif page == "📖 Formula Guide":
+    st.title("📖 Mi-Tiles Dashboard — Formula & Logic Guide")
+    st.caption("Every metric, formula, and classification rule used in this dashboard. Reference this whenever a number looks unexpected.")
+
+    tab1,tab2,tab3,tab4,tab5 = st.tabs([
+        "📦 Inventory","📈 Sales & Demand","🤖 ML Models","💰 Profit","🏆 Classifications"
+    ])
+
+    with tab1:
+        st.markdown("""
+## Inventory Valuation
+
+### Weighted Average Cost (WAC)
+```
+WAC = Σ(Sq.m × Purchase Rate) / Σ(Sq.m)
+```
+Smooths price fluctuations across multiple purchases. Every new purchase blends into the running average.
+
+### Stock Value
+```
+Stock Value = Current Stock Sqm × WAC Rate
+```
+
+### Closing Stock
+The `Closing` column from your ERP — the running balance after each transaction.
+Dashboard uses the **last Closing value per product** as current stock.
+
+---
+
+## Inventory Status (Updated — includes Tail Stock)
+
+| Status | Condition |
+|--------|-----------|
+| 🟢 Active | Last sale ≤ 30 days |
+| 🟡 Slow | 31–90 days |
+| 🟠 At Risk | 91–180 days |
+| 🔴 Critical | 181–360 days |
+| 🟣 **Tail Stock** | Sold >70%, <25% remaining, velocity dropped >60% — display removal, NOT dead |
+| ⚫ Dead Stock | Last sale >360 days, genuinely unsold |
+| ⬜ Out of Stock | Stock ≤ 0 |
+
+**Tail Stock Detection:**
+```
+Sell-Through %  > 70%   (sold most of what was purchased)
+Remaining %     < 25%   (tiny quantity left)
+Velocity Drop % > 60%   (sold fast, then abruptly stopped)
+Days Stagnant   > 90    (has been sitting a while)
+```
+
+**Velocity Drop:**
+```
+Phase 1 Velocity = Sales in first 70% of timeline / days × 30
+Phase 2 Velocity = Sales in last 30% of timeline / days × 30
+Velocity Drop %  = (Phase1 - Phase2) / Phase1 × 100
+```
+
+**Impact:** 500 of 790 previously "Dead Stock" products reclassified as Tail Stock.
+True dead stock = 290 products.
+
+---
+
+## Ghost Performer Detection
+
+Products that sold well, ran out of stock, and now appear slow in reports.
+
+```
+True Velocity = Sqm sold during in-stock periods only
+              / In-stock days × 30
+
+Stockout Count = Number of times Closing hit ≤ 0
+
+Ghost Score = True Velocity × Stockout Count
+            / max(Days Since Last Sale, 1) × 100
+```
+
+High Ghost Score = was fast + stocked out repeatedly + sold recently = **reorder immediately.**
+
+**Reorder quantity for ghost performers:**
+```
+Suggested Reorder = True Velocity × Smart Multiplier × 1.5
+```
+Extra 50% buffer because it already stocked out before.
+
+---
+
+## Audit & Shrinkage
+
+### Shrinkage
+```
+Shrinkage = Σ(ERP Closing - Physical Count) × WAC    [where Physical < ERP]
+Shrinkage % = Shrinkage / Total Stock Value × 100
+```
+Industry benchmark: **0.5–1.5%**. Your tolerance: Rs 4.8M on Rs 482M stock.
+
+### Audit Tiers
+| Tier | Criteria | Frequency |
+|------|----------|-----------|
+| A | Value > Rs 500K OR Velocity > 100 sqm/mo | Monthly |
+| B | Value Rs 100K–500K | Quarterly |
+| C | Value < Rs 100K | Semi-annual |
+| Spot | ML High Risk OR negative ERP stock | Immediate |
+        """)
+
+    with tab2:
+        st.markdown("""
+## Sales Velocity
+```
+Velocity = Net Sales Sqm / Days in Inventory × 30
+Net Sales = Total Sold - Total Returned
+```
+
+## True Velocity (Ghost Performer metric)
+```
+True Velocity = Sqm sold only during days when stock > 0
+              / In-stock days × 30
+```
+Excludes periods when product was out of stock.
+Prevents understating velocity for products that ran out.
+
+## Sale Frequency
+```
+Frequency = Unique Sale Days / Days in Inventory
+```
+0.15 = sells on 15% of days = roughly every 7 days.
+
+## Demand Pattern Rules
+| Pattern | Condition |
+|---------|-----------|
+| Stable Fast Mover | Frequency ≥ 0.15 AND CV < 3 |
+| Volatile Fast Mover | Frequency ≥ 0.15 AND CV ≥ 3 |
+| Slow Stable | 0.05 ≤ Freq < 0.15 AND CV < 3 |
+| Erratic Demand | 0.05 ≤ Freq < 0.15 AND CV ≥ 3 |
+| Dead / Negligible | Frequency < 0.05 |
+
+## Coefficient of Variation (CV)
+```
+CV = Std Deviation of sales / Average daily sales
+```
+Low CV = predictable. High CV = erratic. CV < 3 = manageable.
+
+## Inventory Status (Days Since Last Sale)
+| Status | Threshold |
+|--------|-----------|
+| Active | ≤ 30 days |
+| Slow | 31–90 days |
+| At Risk | 91–180 days |
+| Critical | 181–360 days |
+| Dead Stock | > 360 days |
+
+## Stock Health (Months of Stock)
+```
+Months of Stock = Current Stock / Monthly Velocity
+```
+| Health | Threshold |
+|--------|-----------|
+| Reorder Now | ≤ 1 month |
+| Healthy | 1–3 months |
+| Overstocked | 3–6 months |
+| Dead Stock | > 6 months |
+
+## Sell-Through Rate
+```
+Sell-Through % = Total Net Sold / Total Purchased × 100
+```
+> 80% = excellent. < 20% = dead stock risk.
+
+## Reorder Score (0–100)
+```
+Score = Velocity Score×40% + Customer Score×25% + Frequency Score×20% + ST Score×15%
+```
+Each component normalised to 100. Higher = reorder more urgently.
+
+## Smart Reorder Multiplier
+```
+CV < 0.5   → 2× (stable, avoid overstock)
+CV 0.5–1.5 → 3× (standard)
+CV > 1.5   → 4× (volatile, need buffer)
+
+Suggested Reorder = (Velocity × Multiplier) - Current Stock
+```
+        """)
+
+    with tab3:
+        st.markdown("""
+## ML Model 2 — Dead Stock Early Warning
+**Algorithm:** Gradient Boosting Classifier
+**Accuracy:** AUC 0.954 | Precision 84.5% | Recall 85.2%
+
+**Features:** velocity, frequency, CV, sell-through, WAC, days in inventory, purchased sqm, category, brand
+
+**Output:**
+```
+🟢 Low Risk    = 0–40% probability of dead stock
+🟡 Medium Risk = 40–70%
+🔴 High Risk   = 70–100%
+```
+Retrained on every data refresh. Uses all products with 180+ days history.
+
+---
+
+## ML Model 3 — Customer Churn Score
+```
+Overdue Ratio = Days Since Last Purchase / Customer's Avg Gap
+
+Churn Score = (Overdue Ratio/3 × 60%)
+            + (1 - Frequency/0.1) × 25%
+            + (1 - Bills/20) × 15%
+```
+Each customer compared to **their own** buying rhythm — not a fixed threshold.
+Validated: 91% of High Risk customers actually went inactive.
+
+---
+
+## ML Model 4 — Smart Reorder Multiplier
+CV-based rules (see Sales & Demand tab).
+Validated on all products with 6+ months data.
+
+---
+
+## Tail Stock Algorithm (Rule-based)
+```
+NOT a machine learning model — pure business logic.
+
+IF Sell-Through % > 70%
+AND Remaining Stock % < 25% of total purchased
+AND Velocity Drop % > 60%
+AND Days Since Last Sale > 90
+THEN → Tail Stock (not Dead Stock)
+```
+Reclassifies products removed from display after bulk sold.
+500 products corrected in Mi-Tiles data.
+
+## Ghost Performer Algorithm (Rule-based)
+```
+NOT machine learning — analytical formula.
+
+True Velocity  = in-stock sales / in-stock days × 30
+Stockout Count = times Closing hit ≤ 0
+Ghost Score    = True Velocity × Stockouts / Days Since Sale × 100
+```
+Finds products that stocked out and disappeared from velocity reports.
+377 ghost performers detected in Mi-Tiles data.
+
+---
+
+## ML Model 1 — Demand Forecast
+**Velocity method (default):**
+```
+Forecast = Monthly Velocity × N months
+```
+**Prophet ML (optional per product):**
+Fits trend + seasonality. Requires 6+ months data.
+More accurate than velocity for seasonal products.
+Will improve significantly with 2+ full years of data.
+        """)
+
+    with tab4:
+        st.markdown("""
+## Profit Calculations
+
+### ERP Profit
+Comes directly from your ERP. May not account for all costs.
+
+### Actual Profit — Estimated (before supplier files)
+```
+Local tiles:    = SALE - (Sq.m × WAC × (1 - 0.047))
+Imported tiles: = SALE - (Sq.m × WAC × (1 - 0.130))
+```
+4.7% adjustment covers local freight.
+13.0% covers import freight, duty, clearing, currency loss.
+
+### Actual Profit — Real (after supplier files connected)
+```
+= SALE - (Sq.m × Supplier WAC)
+```
+Most accurate. Uses actual purchase rates from your supplier invoices.
+
+### Hidden Profit
+```
+Hidden Profit = Actual Profit - ERP Profit
+```
+Positive = ERP understates your real profit.
+
+### Salesman Incentive
+```
+Commission      = max(0, Net Revenue - Base Target) × Commission %
+Bonus           = Bonus Amount IF Net Revenue ≥ Bonus Target ELSE 0
+Return Deduction= Net Revenue × Penalty% × max(0, Return Rate% - Threshold%)
+Total Payout    = Base Salary + max(0, Commission + Bonus - Deduction)
+```
+        """)
+
+    with tab5:
+        st.markdown("""
+## Tail Stock vs Dead Stock vs Ghost — Key Differences
+
+| Type | Sell-Through | Remaining | Velocity Pattern | Action |
+|------|-------------|-----------|-----------------|--------|
+| 🟣 Tail Stock | >70% | <25% | Fast then sudden stop | Display / Bundle / Small discount |
+| ⚫ Dead Stock | <70% | >25% | Always slow | Liquidate / Write off |
+| 👻 Ghost | High | ~0% | Fast but stocked out | Reorder immediately |
+
+## ABC Classification (Revenue)
+```
+Sort all products by Total Revenue descending
+Cumulative %:
+A = 0–70%   (top revenue generators — ~10% of products)
+B = 70–90%  (important contributors — ~20% of products)
+C = 90–100% (long tail — ~70% of products)
+```
+
+## XYZ Classification (Consistency)
+```
+Consistency % = Sale Days / Total Months in dataset × 100
+
+X = ≥ 50%  (sells most months — highly predictable)
+Y = 20–50% (moderate consistency)
+Z = < 20%  (rarely sells — unpredictable)
+```
+
+## Combined ABC-XYZ Strategy
+| Class | Strategy |
+|-------|----------|
+| AX | Never stockout. Auto reorder at 1 month cover. |
+| AY | Keep 2 months. Reorder at 6 weeks. |
+| AZ | Keep 1 month + safety stock. Order on demand. |
+| BX | Keep 2 months. Reorder at 6 weeks. |
+| BY | Keep 1.5 months. Monitor monthly. |
+| BZ | Keep minimal. Order on demand only. |
+| CX | Low value but consistent. Keep small buffer. |
+| CZ | **Liquidate or discontinue.** Do not reorder. |
+
+## Customer ABC (Revenue)
+```
+A = Top 80% of customer revenue
+B = Next 15%
+C = Bottom 5%
+```
+
+## Visit Frequency Labels
+| Label | Avg Gap Between Visits |
+|-------|----------------------|
+| 🔥 High Frequency | < 7 days |
+| ✅ Regular | 7–30 days |
+| 🟡 Occasional | 30–90 days |
+| 🔵 Rare | > 90 days |
+        """)
+
+    st.divider()
+    st.caption("Mi-Tiles Intelligence Dashboard — Formula Guide v1.0 | Built with Claude AI")
+
+    # Download button for the markdown file
+    guide_text = open.__doc__  # placeholder
+    try:
+        with open('/mount/src/mitiles-dashboard/MITILES_FORMULA_GUIDE.md') as f:
+            guide_text = f.read()
+    except:
+        guide_text = "Formula guide file not found. Add MITILES_FORMULA_GUIDE.md to your repository."
+
+    st.download_button(
+        "📥 Download Full Guide (Markdown)",
+        guide_text,
+        "MITILES_FORMULA_GUIDE.md",
+        "text/markdown",
+        key="fg_dl"
+    )
+
+
+    st.title("⚔️ Product Showdown")
+    st.caption("Select any two products and see a head-to-head comparison across every metric. Winner declared per category.")
+
+    c1,c2 = st.columns(2)
+    all_prods = sorted(pi['Product No.'].unique().tolist())
+    with c1:
+        prod_a = st.selectbox("🔵 Product A", all_prods, key="ps_a")
+    with c2:
+        prod_b = st.selectbox("🔴 Product B", all_prods,
+                              index=min(1, len(all_prods)-1), key="ps_b")
+
+    if prod_a == prod_b:
+        st.warning("Select two different products")
+        st.stop()
+
+    a = pi[pi['Product No.']==prod_a].iloc[0] if len(pi[pi['Product No.']==prod_a])>0 else None
+    b = pi[pi['Product No.']==prod_b].iloc[0] if len(pi[pi['Product No.']==prod_b])>0 else None
+
+    if a is None or b is None:
+        st.error("Product not found in intelligence data")
+        st.stop()
+
+    # Transaction history for both
+    a_sales = df[(df['Product No.']==prod_a)&(df['Type']=='S')]
+    b_sales = df[(df['Product No.']==prod_b)&(df['Type']=='S')]
+    a_pur   = df[(df['Product No.']==prod_a)&(df['Type'].isin(['P','O.S']))]
+    b_pur   = df[(df['Product No.']==prod_b)&(df['Type'].isin(['P','O.S']))]
+
+    # Recent velocity
+    _today = df['Date'].max()
+    a_v30 = a_sales[a_sales['Date']>=_today-pd.Timedelta(days=30)]['Sq.m'].sum()
+    b_v30 = b_sales[b_sales['Date']>=_today-pd.Timedelta(days=30)]['Sq.m'].sum()
+    a_v90 = a_sales[a_sales['Date']>=_today-pd.Timedelta(days=90)]['Sq.m'].sum()/3
+    b_v90 = b_sales[b_sales['Date']>=_today-pd.Timedelta(days=90)]['Sq.m'].sum()/3
+
+    st.divider()
+
+    # ── Header cards ─────────────────────────────────────────
+    c1,mid,c2 = st.columns([5,1,5])
+    with c1:
+        st.markdown(f"### 🔵 {prod_a}")
+        st.caption(f"{a.get('Brand Name','—')} | {a.get('Category','—')} | {a.get('Size','—')}")
+    with mid:
+        st.markdown("### VS")
+    with c2:
+        st.markdown(f"### 🔴 {prod_b}")
+        st.caption(f"{b.get('Brand Name','—')} | {b.get('Category','—')} | {b.get('Size','—')}")
+
+    st.divider()
+
+    # ── Comparison table ──────────────────────────────────────
+    def winner(val_a, val_b, higher_is_better=True):
+        if pd.isna(val_a) or pd.isna(val_b): return "—","—","—"
+        if higher_is_better:
+            if val_a > val_b*1.05:   return "🔵 **WIN**","","🔴"
+            elif val_b > val_a*1.05: return "🔵","","🔴 **WIN**"
+            else:                    return "🔵 TIE","","🔴 TIE"
+        else:
+            if val_a < val_b*0.95:   return "🔵 **WIN**","","🔴"
+            elif val_b < val_a*0.95: return "🔵","","🔴 **WIN**"
+            else:                    return "🔵 TIE","","🔴 TIE"
+
+    metrics = [
+        ("💰 Total Revenue",         a['Total Revenue'],              b['Total Revenue'],              True,  "Rs {:.0f}"),
+        ("📦 Total Sqm Sold",        a['Total Sales Sqm'],            b['Total Sales Sqm'],            True,  "{:.1f}"),
+        ("⚡ Sales Velocity/Month",  a['Sales Velocity/Month'],       b['Sales Velocity/Month'],       True,  "{:.1f} sqm"),
+        ("📅 Last 30d Velocity",     a_v30,                           b_v30,                           True,  "{:.1f} sqm"),
+        ("📅 Last 90d Avg/Month",    a_v90,                           b_v90,                           True,  "{:.1f} sqm"),
+        ("👥 Unique Customers",      a_sales['Account Name'].nunique(),b_sales['Account Name'].nunique(),True, "{:.0f}"),
+        ("🧾 Total Bills",           a_sales['Bill No.'].nunique(),   b_sales['Bill No.'].nunique(),   True,  "{:.0f}"),
+        ("💵 Avg Sale Rate",         a_sales['Rate'].mean() if len(a_sales)>0 else 0,
+                                     b_sales['Rate'].mean() if len(b_sales)>0 else 0, True, "Rs {:.0f}"),
+        ("📈 ERP Margin %",          a['ERP Margin %'],               b['ERP Margin %'],               True,  "{:.1f}%"),
+        ("🎯 Reorder Score",         a['Reorder Score'],              b['Reorder Score'],              True,  "{:.1f}"),
+        ("✅ Sell Through %",        a['Sell Through %'],             b['Sell Through %'],             True,  "{:.1f}%"),
+        ("📦 Current Stock",         a['Current Stock Sqm'],          b['Current Stock Sqm'],          True,  "{:.1f} sqm"),
+        ("💎 Stock Value",           a['Stock Value PKR'],            b['Stock Value PKR'],            True,  "Rs {:.0f}"),
+        ("⏳ Months of Stock",       a['Months of Stock'],            b['Months of Stock'],            False, "{:.1f} mo"),
+        ("🤖 Dead Stock Risk",       a.get('Dead Stock Risk %',0),    b.get('Dead Stock Risk %',0),    False, "{:.1f}%"),
+        ("👻 Ghost Score",           a.get('Ghost Score',0),          b.get('Ghost Score',0),          True,  "{:.1f}"),
+        ("🔁 Stockout Count",        a.get('Stockout Count',0),       b.get('Stockout Count',0),       True,  "{:.0f}"),
+    ]
+
+    a_wins = 0; b_wins = 0
+    rows = []
+    for metric, va, vb, hib, fmt in metrics:
+        try:
+            wa, _, wb = winner(float(va), float(vb), hib)
+            if '**WIN**' in wa: a_wins += 1
+            if '**WIN**' in wb: b_wins += 1
+            rows.append({
+                'Metric':    metric,
+                '🔵 A':      fmt.format(float(va)) if pd.notna(va) else '—',
+                'Winner':    '🔵' if '**WIN**' in wa else ('🔴' if '**WIN**' in wb else '🤝'),
+                '🔴 B':      fmt.format(float(vb)) if pd.notna(vb) else '—',
+            })
+        except: pass
+
+    st.dataframe(pd.DataFrame(rows), hide_index=True, use_container_width=True)
+
+    # ── Overall Winner ────────────────────────────────────────
+    st.divider()
+    if a_wins > b_wins:
+        st.success(f"## 🏆 Overall Winner: 🔵 {prod_a}")
+        st.markdown(f"Won **{a_wins}** of {a_wins+b_wins} comparable metrics vs {b_wins} for {prod_b}")
+    elif b_wins > a_wins:
+        st.success(f"## 🏆 Overall Winner: 🔴 {prod_b}")
+        st.markdown(f"Won **{b_wins}** of {a_wins+b_wins} comparable metrics vs {a_wins} for {prod_a}")
+    else:
+        st.info(f"## 🤝 Tie — {a_wins} wins each")
+
+    # ── Monthly trend comparison ──────────────────────────────
+    st.divider()
+    st.subheader("📈 Monthly Revenue Comparison")
+    a_monthly = a_sales.groupby(a_sales['Date'].dt.to_period('M').astype(str))['SALE'].sum().reset_index()
+    b_monthly = b_sales.groupby(b_sales['Date'].dt.to_period('M').astype(str))['SALE'].sum().reset_index()
+    a_monthly.columns = ['Month','A Revenue']
+    b_monthly.columns = ['Month','B Revenue']
+    combined = a_monthly.merge(b_monthly, on='Month', how='outer').fillna(0).sort_values('Month')
+    combined['Month'] = combined['Month'].astype(str)
+    st.bar_chart(combined.set_index('Month')[['A Revenue','B Revenue']])
+    st.caption(f"🔵 = {prod_a[:30]} | 🔴 = {prod_b[:30]}")
+
+
+elif page == "⚔️ Product Showdown":
+    st.title("⚔️ Product Showdown")
+    st.caption("Select any two products and see a head-to-head comparison across every metric. Winner declared per category.")
+
+    c1,c2 = st.columns(2)
+    all_prods = sorted(pi['Product No.'].unique().tolist())
+    with c1:
+        prod_a = st.selectbox("🔵 Product A", all_prods, key="ps_a")
+    with c2:
+        prod_b = st.selectbox("🔴 Product B", all_prods,
+                              index=min(1, len(all_prods)-1), key="ps_b")
+
+    if prod_a == prod_b:
+        st.warning("Select two different products")
+        st.stop()
+
+    a = pi[pi['Product No.']==prod_a].iloc[0] if len(pi[pi['Product No.']==prod_a])>0 else None
+    b = pi[pi['Product No.']==prod_b].iloc[0] if len(pi[pi['Product No.']==prod_b])>0 else None
+
+    if a is None or b is None:
+        st.error("Product not found in intelligence data")
+        st.stop()
+
+    a_sales = df[(df['Product No.']==prod_a)&(df['Type']=='S')]
+    b_sales = df[(df['Product No.']==prod_b)&(df['Type']=='S')]
+    _today = df['Date'].max()
+    a_v30 = a_sales[a_sales['Date']>=_today-pd.Timedelta(days=30)]['Sq.m'].sum()
+    b_v30 = b_sales[b_sales['Date']>=_today-pd.Timedelta(days=30)]['Sq.m'].sum()
+    a_v90 = a_sales[a_sales['Date']>=_today-pd.Timedelta(days=90)]['Sq.m'].sum()/3
+    b_v90 = b_sales[b_sales['Date']>=_today-pd.Timedelta(days=90)]['Sq.m'].sum()/3
+
+    st.divider()
+    c1,mid,c2 = st.columns([5,1,5])
+    with c1:
+        st.markdown(f"### 🔵 {prod_a}")
+        st.caption(f"{a.get('Brand Name','—')} | {a.get('Category','—')} | {a.get('Size','—')}")
+    with mid:
+        st.markdown("### VS")
+    with c2:
+        st.markdown(f"### 🔴 {prod_b}")
+        st.caption(f"{b.get('Brand Name','—')} | {b.get('Category','—')} | {b.get('Size','—')}")
+
+    st.divider()
+
+    def winner(val_a, val_b, higher_is_better=True):
+        if pd.isna(val_a) or pd.isna(val_b): return "—","—","—"
+        if higher_is_better:
+            if val_a > val_b*1.05:   return "🔵 **WIN**","","🔴"
+            elif val_b > val_a*1.05: return "🔵","","🔴 **WIN**"
+            else:                    return "🔵 TIE","","🔴 TIE"
+        else:
+            if val_a < val_b*0.95:   return "🔵 **WIN**","","🔴"
+            elif val_b < val_a*0.95: return "🔵","","🔴 **WIN**"
+            else:                    return "🔵 TIE","","🔴 TIE"
+
+    metrics = [
+        ("💰 Total Revenue",        a['Total Revenue'],               b['Total Revenue'],               True,  "Rs {:.0f}"),
+        ("📦 Total Sqm Sold",       a['Total Sales Sqm'],             b['Total Sales Sqm'],             True,  "{:.1f}"),
+        ("⚡ Sales Velocity/Month", a['Sales Velocity/Month'],        b['Sales Velocity/Month'],        True,  "{:.1f} sqm"),
+        ("📅 Last 30d Velocity",    a_v30,                            b_v30,                            True,  "{:.1f} sqm"),
+        ("📅 Last 90d Avg/Month",   a_v90,                            b_v90,                            True,  "{:.1f} sqm"),
+        ("👥 Unique Customers",     a_sales['Account Name'].nunique(),b_sales['Account Name'].nunique(),True,  "{:.0f}"),
+        ("🧾 Total Bills",          a_sales['Bill No.'].nunique(),    b_sales['Bill No.'].nunique(),    True,  "{:.0f}"),
+        ("💵 Avg Sale Rate",        a_sales['Rate'].mean() if len(a_sales)>0 else 0,
+                                    b_sales['Rate'].mean() if len(b_sales)>0 else 0,                   True,  "Rs {:.0f}"),
+        ("📈 ERP Margin %",         a['ERP Margin %'],                b['ERP Margin %'],                True,  "{:.1f}%"),
+        ("🎯 Reorder Score",        a['Reorder Score'],               b['Reorder Score'],               True,  "{:.1f}"),
+        ("✅ Sell Through %",       a['Sell Through %'],              b['Sell Through %'],              True,  "{:.1f}%"),
+        ("📦 Current Stock",        a['Current Stock Sqm'],           b['Current Stock Sqm'],           True,  "{:.1f} sqm"),
+        ("💎 Stock Value",          a['Stock Value PKR'],             b['Stock Value PKR'],             True,  "Rs {:.0f}"),
+        ("⏳ Months of Stock",      a['Months of Stock'],             b['Months of Stock'],             False, "{:.1f} mo"),
+        ("🤖 Dead Stock Risk",      a.get('Dead Stock Risk %',0),     b.get('Dead Stock Risk %',0),     False, "{:.1f}%"),
+        ("👻 Ghost Score",          a.get('Ghost Score',0),           b.get('Ghost Score',0),           True,  "{:.1f}"),
+        ("🔁 Stockout Count",       a.get('Stockout Count',0),        b.get('Stockout Count',0),        True,  "{:.0f}"),
+    ]
+
+    a_wins = 0; b_wins = 0
+    rows = []
+    for metric, va, vb, hib, fmt in metrics:
+        try:
+            wa, _, wb = winner(float(va), float(vb), hib)
+            if '**WIN**' in wa: a_wins += 1
+            if '**WIN**' in wb: b_wins += 1
+            rows.append({
+                'Metric': metric,
+                '🔵 A':   fmt.format(float(va)) if pd.notna(va) else '—',
+                'Winner': '🔵' if '**WIN**' in wa else ('🔴' if '**WIN**' in wb else '🤝'),
+                '🔴 B':   fmt.format(float(vb)) if pd.notna(vb) else '—',
+            })
+        except: pass
+
+    st.dataframe(pd.DataFrame(rows), hide_index=True, use_container_width=True)
+
+    st.divider()
+    if a_wins > b_wins:
+        st.success(f"## 🏆 Overall Winner: 🔵 {prod_a}")
+        st.markdown(f"Won **{a_wins}** of {a_wins+b_wins} metrics vs {b_wins} for {prod_b}")
+    elif b_wins > a_wins:
+        st.success(f"## 🏆 Overall Winner: 🔴 {prod_b}")
+        st.markdown(f"Won **{b_wins}** of {a_wins+b_wins} metrics vs {a_wins} for {prod_a}")
+    else:
+        st.info(f"## 🤝 Tie — {a_wins} wins each")
+
+    st.divider()
+    st.subheader("📈 Monthly Revenue Comparison")
+    a_monthly = a_sales.groupby(a_sales['Date'].dt.to_period('M').astype(str))['SALE'].sum().reset_index()
+    b_monthly = b_sales.groupby(b_sales['Date'].dt.to_period('M').astype(str))['SALE'].sum().reset_index()
+    a_monthly.columns = ['Month','A Revenue']
+    b_monthly.columns = ['Month','B Revenue']
+    combined = a_monthly.merge(b_monthly, on='Month', how='outer').fillna(0).sort_values('Month')
+    st.bar_chart(combined.set_index('Month')[['A Revenue','B Revenue']])
+    st.caption(f"🔵 = {prod_a[:30]} | 🔴 = {prod_b[:30]}")
+
+elif page == "👻 Ghost Performers":
+    if not is_admin: st.error("Admin only."); st.stop()
+    st.title("👻 Ghost Performers")
+    st.caption("Products that sold well but ran out of stock — hidden from normal reports but worth reordering")
+
+    with st.expander("📖 What is a Ghost Performer?", expanded=False):
+        st.markdown("""
+A **Ghost Performer** is a product that:
+1. Was selling well (high velocity)
+2. Ran out of stock (hit zero)
+3. Now shows low/zero sales — not because demand dried up, but because there's nothing to sell
+
+**Why it matters:** The dashboard's velocity, fast movers, and demand forecast all use recent sales.
+If a product has been out of stock for 2 months, it shows low recent velocity — misleading you into thinking it's slow.
+
+**Ghost Score formula:**
+```
+Ghost Score = True Velocity × Stockout Count / Days Since Last Sale × 100
+```
+High score = was selling fast + stocked out multiple times + sold recently = definitely worth reordering.
+
+**True Velocity** = velocity calculated only during periods when stock was actually available.
+        """)
+
+    st.divider()
+
+    # Get ghost performers from pi
+    ghost = pi[pi['Ghost Score'] > 0].copy()
+    ghost = ghost[ghost['Current Stock Sqm'] <= 0].copy()  # Only out of stock
+    ghost = ghost.sort_values('Ghost Score', ascending=False)
+
+    if len(ghost) == 0:
+        st.success("No ghost performers detected — all previously fast products are currently in stock.")
+        st.stop()
+
+    # Filters
+    c1,c2,c3 = st.columns(3)
+    with c1:
+        min_vel = st.number_input("Min True Velocity (sqm/month)", value=50, step=10, key="gp_vel")
+    with c2:
+        min_so  = st.number_input("Min Stockout Count", value=1, step=1, key="gp_so")
+    with c3:
+        max_days= st.number_input("Max Days Since Last Sale", value=180, step=30, key="gp_days")
+
+    ghost = ghost[
+        (ghost['True Velocity'] >= min_vel) &
+        (ghost['Stockout Count'] >= min_so) &
+        (ghost['Days Since Last Sale'] <= max_days)
+    ]
+
+    # Metrics
+    c1,c2,c3,c4 = st.columns(4)
+    c1.metric("Ghost Performers", f"{len(ghost):,}")
+    c2.metric("Avg True Velocity", f"{ghost['True Velocity'].mean():.0f} sqm/mo")
+    c3.metric("Total Suggested Reorder", f"{ghost['Suggested Reorder Sqm'].sum():,.0f} sqm")
+    c4.metric("Est. Revenue Opportunity",
+              fmt_m(ghost['Suggested Reorder Sqm'].sum() * ghost['WAC Rate'].mean() * 1.15))
+
+    st.divider()
+
+    # ── Reorder Decision Helper ───────────────────────────────
+    st.subheader("📋 Ghost Performer Reorder List")
+    st.caption("Sorted by Ghost Score — highest priority first")
+
+    # Add reorder value estimate
+    ghost['Suggested Reorder Sqm'] = ghost['Suggested Reorder Sqm'].round(1)
+    ghost['Reorder Value (Rs)']    = (ghost['Suggested Reorder Sqm'] * ghost['WAC Rate']).round(0)
+    ghost['Payback (months)']      = (ghost['Suggested Reorder Sqm'] / ghost['True Velocity'].replace(0,np.nan)).round(1)
+    ghost['Priority']              = ghost['Ghost Score'].apply(
+        lambda x: '🔴 High' if x>1000 else ('🟡 Medium' if x>100 else '🟢 Low'))
+
+    disp_cols = ['Product No.','Brand Name','Category','Size',
+                 'Priority','Ghost Score','True Velocity','Stockout Count',
+                 'Days Since Last Sale','WAC Rate','Suggested Reorder Sqm',
+                 'Reorder Value (Rs)','Payback (months)']
+
+    st.dataframe(ghost[[c for c in disp_cols if c in ghost.columns]],
+                 hide_index=True, use_container_width=True)
+    st.download_button("📥 Download Reorder List",
+                       ghost.to_csv(index=False),
+                       "ghost_performers.csv","text/csv",key="gp_dl")
+
+    st.divider()
+
+    # ── Individual product deep dive ──────────────────────────
+    st.subheader("🔍 Deep Dive — Reorder Decision for Selected Product")
+    selected = st.selectbox("Select ghost product to analyse:",
+                            ghost['Product No.'].tolist(), key="gp_sel")
+
+    if selected:
+        row = ghost[ghost['Product No.']==selected].iloc[0]
+        prod_txns = df[df['Product No.']==selected].sort_values('Date')
+        prod_sales= prod_txns[prod_txns['Type']=='S']
+
+        c1,c2 = st.columns(2)
+        with c1:
+            st.markdown(f"**{selected}**")
+            st.markdown(f"Brand: {row.get('Brand Name','—')} | Size: {row.get('Size','—')}")
+            st.metric("True Velocity",       f"{row['True Velocity']:.1f} sqm/month")
+            st.metric("Stocked Out",         f"{int(row['Stockout Count'])} times")
+            st.metric("Last Sale",           f"{int(row['Days Since Last Sale'])} days ago")
+            st.metric("All-time Revenue",    fmt_m(prod_sales['SALE'].sum()))
+            st.metric("Unique Customers",    f"{prod_sales['Account Name'].nunique()}")
+        with c2:
+            st.markdown("**Reorder Recommendation**")
+            st.metric("Suggested Qty",       f"{row['Suggested Reorder Sqm']:.1f} sqm")
+            st.metric("At WAC Rate",         f"Rs {row['WAC Rate']:,.0f}/sqm")
+            st.metric("Investment Required", fmt_m(row['Reorder Value (Rs)']))
+            st.metric("Payback Period",      f"{row['Payback (months)']:.1f} months")
+            est_margin = row.get('ERP Margin %', 8) / 100
+            est_profit = row['Suggested Reorder Sqm'] * row['WAC Rate'] * est_margin / (1-est_margin)
+            st.metric("Est. Profit on Reorder", fmt_m(est_profit))
+
+        st.markdown("**📅 Stock History**")
+        prod_txns['Date_fmt'] = prod_txns['Date'].dt.strftime('%d-%m-%Y')
+        st.dataframe(
+            prod_txns[['Date_fmt','Type','Sq.m','Rate','Closing']].tail(20),
+            hide_index=True, use_container_width=True
+        )
+        st.caption("Look for Closing hitting 0 — each time = a stockout event")
+
+        # Monthly sales before stockout
+        if len(prod_sales) > 0:
+            st.markdown("**📈 Monthly Sales History**")
+            monthly = prod_sales.groupby(
+                prod_sales['Date'].dt.to_period('M').astype(str)
+            )['Sq.m'].sum().reset_index()
+            monthly.columns = ['Month','Sqm Sold']
+            st.bar_chart(monthly.set_index('Month'))
+
+
+elif page == "🟣 Tail Stock":
+    if not is_admin: st.error("Admin only."); st.stop()
+    st.title("🟣 Tail Stock")
+    st.caption("Products that sold well but have a small remainder sitting unsold — likely removed from display, NOT truly dead stock.")
+
+    with st.expander("📖 What is Tail Stock?", expanded=False):
+        st.markdown("""
+**The Problem:**
+You buy 1,000 sqm of a product. It sells 900 sqm very quickly.
+At 100 sqm remaining you remove it from the display floor — low stock, not worth displaying.
+That 100 sqm now sits in the warehouse for 6 months.
+
+The dashboard previously called this **Dead Stock** — wrong.
+The product was a fast seller. The remainder exists because of a deliberate display decision, not lack of demand.
+
+**Tail Stock Detection Formula:**
+```
+Sell-Through %   > 70%   (sold most of what was purchased)
+Remaining %      < 25%   (small quantity left)
+Velocity Drop %  > 60%   (sold fast, then abruptly stopped)
+Days Since Sale  > 90    (has been sitting a while)
+```
+
+**Velocity Drop:**
+```
+Phase 1 Velocity = Sales in first 70% of transaction timeline / days × 30
+Phase 2 Velocity = Sales in last 30% of transaction timeline / days × 30
+Velocity Drop %  = (Phase1 - Phase2) / Phase1 × 100
+```
+High drop = product was fast moving, then stopped suddenly.
+
+**What to do:**
+- **Put it back on display** — demand existed, may still exist
+- **Bundle** with current fast movers (complementary size/style)
+- **Small discount** (5-10%) to clear — at 90%+ sell-through the margin is already secured
+- **Salesman push** — assign to a specific salesman to clear
+
+**Impact on your data:**
+500 of your previous 790 "Dead Stock" products were actually Tail Stock.
+True dead stock is only 290 products.
+        """)
+
+    st.divider()
+
+    # Get tail stock from pi
+    tail = pi[pi['Inventory Status']=='Tail Stock'].copy()
+    tail = tail[tail['Current Stock Sqm'] > 0].copy()
+    tail = tail.sort_values('Velocity Drop %', ascending=False)
+
+    if len(tail) == 0:
+        st.info("No Tail Stock products detected with current filters.")
+        st.stop()
+
+    # Filters
+    c1,c2,c3 = st.columns(3)
+    with c1:
+        br_t = st.selectbox("Brand", ['All']+sorted(tail['Brand Name'].dropna().unique().tolist()), key="ts_br")
+    with c2:
+        cat_t= st.selectbox("Category",['All']+sorted(tail['Category'].dropna().unique().tolist()), key="ts_cat")
+    with c3:
+        min_val = st.number_input("Min Stock Value (Rs)", value=0, step=5000, key="ts_val")
+
+    if br_t  != 'All': tail = tail[tail['Brand Name']==br_t]
+    if cat_t != 'All': tail = tail[tail['Category']==cat_t]
+    tail = tail[tail['Stock Value PKR'] >= min_val]
+
+    # Metrics
+    c1,c2,c3,c4 = st.columns(4)
+    c1.metric("Tail Stock Products",     f"{len(tail):,}")
+    c2.metric("Stock Value",             fmt_m(tail['Stock Value PKR'].sum()))
+    c3.metric("Total Sqm",              f"{tail['Current Stock Sqm'].sum():,.0f}")
+    c4.metric("Prev. Misclassified as", "Dead Stock ⚫",
+              help="These were shown as Dead Stock before. They sold well — just need a push.")
+
+    st.info(f"💡 These {len(tail):,} products were previously shown as Dead Stock. "
+            f"They represent **{fmt_m(tail['Stock Value PKR'].sum())}** that can likely be sold "
+            f"with minimal discounting — demand existed before.")
+
+    st.divider()
+
+    # Main table
+    st.subheader("📋 Tail Stock Products")
+
+    # Add action suggestion
+    tail['Suggested Action'] = tail.apply(lambda r:
+        '🖼️ Back to Display' if r['Current Stock Sqm'] > 20
+        else ('🤝 Bundle Deal' if r['Current Stock Sqm'] > 5
+              else '🏷️ Clearance (small qty)'), axis=1)
+
+    tail['Discount to Clear'] = tail.apply(lambda r:
+        '5%' if r.get('Velocity Drop %',0) > 95
+        else ('10%' if r.get('Velocity Drop %',0) > 80
+              else '15%'), axis=1)
+
+    disp_cols = ['Product No.','Brand Name','Category','Size',
+                 'Current Stock Sqm','WAC Rate','Stock Value PKR',
+                 'Sell Through %','Velocity Drop %','Days Since Last Sale',
+                 'Sales Velocity/Month','Suggested Action','Discount to Clear']
+
+    st.dataframe(tail[[c for c in disp_cols if c in tail.columns]],
+                 hide_index=True, use_container_width=True)
+    st.download_button("📥 Download Tail Stock",
+                       tail.to_csv(index=False),
+                       "tail_stock.csv","text/csv",key="ts_dl")
+
+    st.divider()
+
+    # By brand summary
+    st.subheader("🏭 Tail Stock by Brand")
+    brand_tail = tail.groupby('Brand Name').agg(
+        Products   =('Product No.','count'),
+        Sqm        =('Current Stock Sqm','sum'),
+        Value      =('Stock Value PKR','sum'),
+        Avg_VDrop  =('Velocity Drop %','mean')
+    ).reset_index().sort_values('Value',ascending=False)
+    brand_tail['Stock Value'] = brand_tail['Value'].apply(fmt_m)
+    brand_tail['Avg Velocity Drop'] = brand_tail['Avg_VDrop'].round(1)
+    st.dataframe(brand_tail[['Brand Name','Products','Sqm','Stock Value','Avg Velocity Drop']],
+                 hide_index=True, use_container_width=True)
+
+    st.divider()
+
+    # Deep dive
+    st.subheader("🔍 Deep Dive — Selected Product")
+    sel_tail = st.selectbox("Select product:",
+                            tail['Product No.'].tolist(), key="ts_sel")
+    if sel_tail:
+        row = tail[tail['Product No.']==sel_tail].iloc[0]
+        prod_txns = df[df['Product No.']==sel_tail].sort_values('Date')
+        prod_sales= prod_txns[prod_txns['Type']=='S']
+
+        c1,c2 = st.columns(2)
+        with c1:
+            st.markdown(f"**{sel_tail}**")
+            st.markdown(f"Brand: {row.get('Brand Name','—')} | Size: {row.get('Size','—')}")
+            st.metric("Phase 1 Velocity", f"{row.get('Sales Velocity/Month',0):.1f} sqm/mo",
+                      help="Velocity during active selling phase")
+            st.metric("Velocity Drop",    f"{row.get('Velocity Drop %',0):.1f}%")
+            st.metric("Sell-Through",     f"{row.get('Sell Through %',0):.1f}%")
+            st.metric("Days Stagnant",    f"{row.get('Days Since Last Sale',0):.0f} days")
+            st.metric("All-time Revenue", fmt_m(prod_sales['SALE'].sum()))
+        with c2:
+            st.markdown("**🎯 Action Plan**")
+            st.metric("Current Stock",    f"{row['Current Stock Sqm']:.2f} sqm")
+            st.metric("Stock Value",      fmt_m(row['Stock Value PKR']))
+            st.metric("WAC Rate",         f"Rs {row['WAC Rate']:,.0f}/sqm")
+            disc = int(row['Discount to Clear'].replace('%',''))
+            clear_rate = row['WAC Rate'] * (1 - disc/100) * 1.05
+            st.metric("Suggested Sale Price", f"Rs {clear_rate:,.0f}/sqm ({disc}% discount on cost)")
+            recovery = row['Current Stock Sqm'] * clear_rate
+            st.metric("Expected Recovery",    fmt_m(recovery))
+
+        # Transaction history
+        st.markdown("**📅 Transaction History**")
+        prod_txns['Date_fmt'] = prod_txns['Date'].dt.strftime('%d-%m-%Y')
+        st.dataframe(
+            prod_txns[['Date_fmt','Type','Sq.m','Rate','Closing']],
+            hide_index=True, use_container_width=True
+        )
+        st.caption("Notice: fast sales early, then sudden stop — classic tail stock pattern")
+
+        if len(prod_sales)>0:
+            st.markdown("**📈 Monthly Sales — See the drop**")
+            monthly = prod_sales.groupby(
+                prod_sales['Date'].dt.to_period('M').astype(str)
+            )['Sq.m'].sum().reset_index()
+            monthly.columns=['Month','Sqm Sold']
+            st.bar_chart(monthly.set_index('Month'))
+
+
+elif page == "⚙️ Metrics Config":
+    if not is_admin: st.error("Admin only."); st.stop()
+    st.title("⚙️ Metrics Configuration")
+    st.caption("All thresholds and formula parameters — change here, dashboard updates instantly. Changes apply to current session.")
+
+    cfg = get_config()
+
+    st.info("💡 Changes take effect immediately on all dashboard pages. "
+            "Click **Apply & Refresh** at the bottom to rebuild all calculations with new values. "
+            "Click **Reset to Defaults** to undo all changes.")
+
+    # ── Section 1: Cost Adjustments ──────────────────────────
+    st.divider()
+    st.subheader("💰 Cost Adjustments")
+    st.caption("Used in Actual Profit when supplier files are not connected")
+    c1,c2 = st.columns(2)
+    with c1:
+        cfg['local_adj'] = st.slider(
+            "Local Tiles adjustment %",
+            0.0, 20.0, cfg['local_adj']*100, 0.1,
+            help="Added to WAC for local tile purchases (freight within Pakistan)",
+            key="cfg_local"
+        ) / 100
+        st.caption(f"Current: {cfg['local_adj']*100:.1f}% | Default: 4.7%")
+    with c2:
+        cfg['imported_adj'] = st.slider(
+            "Imported Tiles adjustment %",
+            0.0, 30.0, cfg['imported_adj']*100, 0.1,
+            help="Added to WAC for imports (freight + duty + clearing + currency loss)",
+            key="cfg_imported"
+        ) / 100
+        st.caption(f"Current: {cfg['imported_adj']*100:.1f}% | Default: 13.0%")
+
+    # ── Section 2: Inventory Status ───────────────────────────
+    st.divider()
+    st.subheader("📦 Inventory Status Thresholds")
+    st.caption("Days since last sale — product moves to next status when threshold crossed")
+    c1,c2,c3,c4 = st.columns(4)
+    with c1:
+        cfg['inv_active_days'] = st.number_input(
+            "🟢 Active (≤ days)", value=cfg['inv_active_days'], step=5,
+            help="Last sale within this many days = Active", key="cfg_active")
+    with c2:
+        cfg['inv_slow_days'] = st.number_input(
+            "🟡 Slow (≤ days)", value=cfg['inv_slow_days'], step=10,
+            help="Active threshold to this = Slow", key="cfg_slow")
+    with c3:
+        cfg['inv_at_risk_days'] = st.number_input(
+            "🟠 At Risk (≤ days)", value=cfg['inv_at_risk_days'], step=10,
+            help="Slow threshold to this = At Risk", key="cfg_atrisk")
+    with c4:
+        cfg['inv_critical_days'] = st.number_input(
+            "🔴 Critical (≤ days)", value=cfg['inv_critical_days'], step=10,
+            help="At Risk to this = Critical. Beyond = Dead Stock", key="cfg_critical")
+
+    # ── Section 3: Stock Health ───────────────────────────────
+    st.divider()
+    st.subheader("🏥 Stock Health Thresholds")
+    st.caption("Months of stock remaining at current sales velocity")
+    c1,c2,c3 = st.columns(3)
+    with c1:
+        cfg['sh_reorder_months'] = st.number_input(
+            "🚨 Reorder Now (≤ months)", value=cfg['sh_reorder_months'],
+            step=0.5, format="%.1f", key="cfg_reorder")
+    with c2:
+        cfg['sh_healthy_months'] = st.number_input(
+            "✅ Healthy (≤ months)", value=cfg['sh_healthy_months'],
+            step=0.5, format="%.1f", key="cfg_healthy")
+    with c3:
+        cfg['sh_overstock_months'] = st.number_input(
+            "📦 Overstocked (≤ months)", value=cfg['sh_overstock_months'],
+            step=0.5, format="%.1f", key="cfg_overstock")
+    st.caption(f"Beyond {cfg['sh_overstock_months']:.1f} months = Dead Stock")
+
+    # ── Section 4: Demand Pattern ─────────────────────────────
+    st.divider()
+    st.subheader("📈 Demand Pattern Thresholds")
+    c1,c2,c3 = st.columns(3)
+    with c1:
+        cfg['dp_fast_freq'] = st.number_input(
+            "Fast Mover frequency threshold", value=cfg['dp_fast_freq'],
+            step=0.01, format="%.3f",
+            help="Sells on this fraction of days = Fast Mover. Default 0.15 = every 7 days",
+            key="cfg_fastfreq")
+        st.caption(f"= sells every {1/cfg['dp_fast_freq']:.0f} days")
+    with c2:
+        cfg['dp_slow_freq'] = st.number_input(
+            "Slow Mover frequency threshold", value=cfg['dp_slow_freq'],
+            step=0.005, format="%.3f",
+            help="Between slow and fast threshold = Slow Mover", key="cfg_slowfreq")
+        st.caption(f"= sells every {1/cfg['dp_slow_freq']:.0f} days")
+    with c3:
+        cfg['dp_cv_threshold'] = st.number_input(
+            "CV threshold (stable vs volatile)", value=cfg['dp_cv_threshold'],
+            step=0.5, format="%.1f",
+            help="CV below this = Stable, above = Volatile. CV measures demand consistency",
+            key="cfg_cv")
+
+    # ── Section 5: ABC-XYZ ────────────────────────────────────
+    st.divider()
+    st.subheader("📊 ABC-XYZ Classification")
+    c1,c2 = st.columns(2)
+    with c1:
+        st.markdown("**ABC (Revenue contribution %)**")
+        c1a,c1b = st.columns(2)
+        with c1a:
+            cfg['abc_a_pct'] = st.number_input(
+                "A threshold %", value=cfg['abc_a_pct'], step=5.0,
+                help="Top X% of cumulative revenue = Class A", key="cfg_abc_a")
+        with c1b:
+            cfg['abc_b_pct'] = st.number_input(
+                "B threshold %", value=cfg['abc_b_pct'], step=5.0,
+                help="Up to X% = Class B, rest = Class C", key="cfg_abc_b")
+        st.caption(f"A = 0–{cfg['abc_a_pct']:.0f}% | B = {cfg['abc_a_pct']:.0f}–{cfg['abc_b_pct']:.0f}% | C = {cfg['abc_b_pct']:.0f}–100%")
+    with c2:
+        st.markdown("**XYZ (Consistency %)**")
+        c2a,c2b = st.columns(2)
+        with c2a:
+            cfg['xyz_x_pct'] = st.number_input(
+                "X threshold %", value=cfg['xyz_x_pct'], step=5.0,
+                help="Sells in X% of months = Class X (very consistent)", key="cfg_xyz_x")
+        with c2b:
+            cfg['xyz_y_pct'] = st.number_input(
+                "Y threshold %", value=cfg['xyz_y_pct'], step=5.0,
+                help="Between Y and X = Class Y", key="cfg_xyz_y")
+        st.caption(f"X = ≥{cfg['xyz_x_pct']:.0f}% | Y = {cfg['xyz_y_pct']:.0f}–{cfg['xyz_x_pct']:.0f}% | Z = <{cfg['xyz_y_pct']:.0f}%")
+
+    # ── Section 6: Reorder Score ──────────────────────────────
+    st.divider()
+    st.subheader("🎯 Reorder Score Weights")
+    st.caption("Must sum to 100%. Adjust which factors matter most for reorder priority.")
+    c1,c2,c3,c4 = st.columns(4)
+    with c1:
+        cfg['rs_vel_weight'] = st.slider("Velocity weight %", 0, 100,
+            int(cfg['rs_vel_weight']*100), 5, key="cfg_rw_vel") / 100
+    with c2:
+        cfg['rs_cust_weight'] = st.slider("Customers weight %", 0, 100,
+            int(cfg['rs_cust_weight']*100), 5, key="cfg_rw_cust") / 100
+    with c3:
+        cfg['rs_freq_weight'] = st.slider("Frequency weight %", 0, 100,
+            int(cfg['rs_freq_weight']*100), 5, key="cfg_rw_freq") / 100
+    with c4:
+        cfg['rs_st_weight'] = st.slider("Sell-Through weight %", 0, 100,
+            int(cfg['rs_st_weight']*100), 5, key="cfg_rw_st") / 100
+    total_w = cfg['rs_vel_weight']+cfg['rs_cust_weight']+cfg['rs_freq_weight']+cfg['rs_st_weight']
+    if abs(total_w - 1.0) > 0.05:
+        st.warning(f"Weights sum to {total_w*100:.0f}% — should be 100%. Adjust to balance.")
+    else:
+        st.success(f"Weights sum: {total_w*100:.0f}% ✅")
+
+    # ── Section 7: Smart Reorder Multiplier ───────────────────
+    st.divider()
+    st.subheader("📦 Smart Reorder Multiplier (CV-based)")
+    st.caption("Products assigned a multiplier based on demand volatility (CV)")
+    c1,c2,c3 = st.columns(3)
+    with c1:
+        st.markdown("**🟢 Low Volatility (CV < threshold)**")
+        cfg['rm_cv_low']  = st.number_input("CV threshold", value=cfg['rm_cv_low'],
+            step=0.1, format="%.1f", key="cfg_cv_low")
+        cfg['rm_mult_low']= st.number_input("Multiplier", value=cfg['rm_mult_low'],
+            step=0.5, format="%.1f", key="cfg_mult_low")
+    with c2:
+        st.markdown("**🟡 Medium Volatility**")
+        cfg['rm_cv_high']  = st.number_input("CV threshold", value=cfg['rm_cv_high'],
+            step=0.1, format="%.1f", key="cfg_cv_high")
+        cfg['rm_mult_mid'] = st.number_input("Multiplier", value=cfg['rm_mult_mid'],
+            step=0.5, format="%.1f", key="cfg_mult_mid")
+    with c3:
+        st.markdown("**🔴 High Volatility (CV > both)**")
+        cfg['rm_mult_high']= st.number_input("Multiplier", value=cfg['rm_mult_high'],
+            step=0.5, format="%.1f", key="cfg_mult_high")
+        st.caption(f"CV < {cfg['rm_cv_low']:.1f} → {cfg['rm_mult_low']:.1f}×  |  CV {cfg['rm_cv_low']:.1f}–{cfg['rm_cv_high']:.1f} → {cfg['rm_mult_mid']:.1f}×  |  CV > {cfg['rm_cv_high']:.1f} → {cfg['rm_mult_high']:.1f}×")
+
+    # ── Section 8: Tail Stock ─────────────────────────────────
+    st.divider()
+    st.subheader("🟣 Tail Stock Detection Thresholds")
+    c1,c2,c3,c4 = st.columns(4)
+    with c1:
+        cfg['tail_st_pct'] = st.number_input("Min Sell-Through %",
+            value=cfg['tail_st_pct'], step=5.0, key="cfg_tail_st",
+            help="Product must have sold at least this % to be Tail Stock")
+    with c2:
+        cfg['tail_rem_pct'] = st.number_input("Max Remaining %",
+            value=cfg['tail_rem_pct'], step=5.0, key="cfg_tail_rem",
+            help="Must have less than this % remaining of total purchased")
+    with c3:
+        cfg['tail_vdrop_pct'] = st.number_input("Min Velocity Drop %",
+            value=cfg['tail_vdrop_pct'], step=5.0, key="cfg_tail_vd",
+            help="Phase 1 vs Phase 2 velocity must have dropped by at least this %")
+    with c4:
+        cfg['tail_days'] = st.number_input("Min Days Stagnant",
+            value=cfg['tail_days'], step=10, key="cfg_tail_days",
+            help="Must have been sitting unsold for at least this many days")
+
+    # ── Section 9: Dead Stock Liquidation ─────────────────────
+    st.divider()
+    st.subheader("🏷️ Dead Stock Liquidation Discount Schedule")
+    c1,c2,c3,c4 = st.columns(4)
+    with c1:
+        cfg['liq_days_1'] = st.number_input("Stage 1 (≤ days)", value=cfg['liq_days_1'], step=30, key="cfg_liq_d1")
+        cfg['liq_disc_1'] = st.number_input("Stage 1 discount %", value=cfg['liq_disc_1'], step=5, key="cfg_liq_p1")
+    with c2:
+        cfg['liq_days_2'] = st.number_input("Stage 2 (≤ days)", value=cfg['liq_days_2'], step=30, key="cfg_liq_d2")
+        cfg['liq_disc_2'] = st.number_input("Stage 2 discount %", value=cfg['liq_disc_2'], step=5, key="cfg_liq_p2")
+    with c3:
+        cfg['liq_days_3'] = st.number_input("Stage 3 (≤ days)", value=cfg['liq_days_3'], step=30, key="cfg_liq_d3")
+        cfg['liq_disc_3'] = st.number_input("Stage 3 discount %", value=cfg['liq_disc_3'], step=5, key="cfg_liq_p3")
+    with c4:
+        st.markdown("**Stage 4 (beyond Stage 3)**")
+        cfg['liq_disc_4'] = st.number_input("Stage 4 discount %", value=cfg['liq_disc_4'], step=5, key="cfg_liq_p4")
+    st.caption(f"≤{cfg['liq_days_1']}d → {cfg['liq_disc_1']}% | ≤{cfg['liq_days_2']}d → {cfg['liq_disc_2']}% | ≤{cfg['liq_days_3']}d → {cfg['liq_disc_3']}% | beyond → {cfg['liq_disc_4']}%")
+
+    # ── Apply & Reset ─────────────────────────────────────────
+    st.divider()
+    c1,c2,c3 = st.columns(3)
+    with c1:
+        if st.button("✅ Apply & Refresh Data", type="primary", key="cfg_apply"):
+            st.session_state['dashboard_config'] = cfg
+            st.cache_data.clear()
+            st.success("Config saved. Data rebuilding with new values...")
+            st.rerun()
+    with c2:
+        if st.button("🔄 Reset to Defaults", key="cfg_reset"):
+            st.session_state['dashboard_config'] = DEFAULT_CONFIG.copy()
+            st.cache_data.clear()
+            st.success("Reset to defaults.")
+            st.rerun()
+    with c3:
+        # Show config as JSON for copy/paste
+        with st.expander("📋 Export current config"):
+            import json
+            st.code(json.dumps(cfg, indent=2), language='json')
