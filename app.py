@@ -439,6 +439,7 @@ def load_data(path):
 
 @st.cache_data(ttl=3600)
 def build_pi(_df, _prod):
+    cfg   = get_config()
     today = pd.Timestamp.today().normalize()
     results = []
     for prod_no, g in _df.groupby('Product No.'):
@@ -474,7 +475,6 @@ def build_pi(_df, _prod):
         freq_norm = min(freq/cfg['rs_freq_base']*100, 100) if freq>0 else 0
         st_norm   = min((ns/max(psq,1))*100, 100)
         reorder_score = round(vel_norm*cfg['rs_vel_weight'] + cust_norm*cfg['rs_cust_weight'] + freq_norm*cfg['rs_freq_weight'] + st_norm*cfg['rs_st_weight'], 1)
-        cfg=get_config()
         if ns<=0:              dp='No Sales / Returns Only'
         elif freq>=cfg['dp_fast_freq'] and cv<cfg['dp_cv_threshold']: dp='Stable Fast Mover'
         elif freq>=cfg['dp_fast_freq']:     dp='Volatile Fast Mover'
