@@ -468,8 +468,8 @@ def load_data(path):
         # Store log for Supplier Costs page
         st.session_state['supplier_log'] = supplier_log
 
-    except Exception:
-        pass
+    except Exception as _sup_ex:
+        st.session_state['supplier_log'] = [('ERROR', '—', 0, str(_sup_ex)[:300])]
 
     # ── Build final cost map ──────────────────────────────────
     supplier_wac_map = {}
