@@ -310,71 +310,178 @@ def load_data(path):
     df = df.merge(wac, on='Product No.', how='left')
     df['WAC Rate'] = df['WAC Rate'].fillna(0)
 
-    # ── Load Supplier Costs from Google Drive folder ────────
-    supplier_wac = {}
+    # ── Load Supplier Costs from Google Sheets ───────────────
+    # Each supplier workbook is a separate Google Sheet.
+    # Only reads sheets named erp-purchases-1, erp-purchases-2, etc.
+    # Columns expected: item code, net cost, supplier name
+    # All costs are per sqm in PKR.
+    supplier_wac   = {}   # {item_code_upper: {'sqm': total, 'val': total, 'supplier': name}}
+    supplier_match = {}   # {item_code_upper: 'exact'|'fuzzy'|'override'}
+    supplier_log   = []   # list of (supplier, sheet, rows_loaded, errors)
+
     try:
-        import re as _re
         supplier_file_ids = st.secrets.get("SUPPLIER_FILE_IDS", "")
+        cost_override_id  = st.secrets.get("SUPPLIER_COST_OVERRIDE_ID", "")
+
+        def _load_supplier_sheet(fid, sheet_name):
+            """Load one erp-purchases sheet from a Google Sheets file."""
+            url = (f"https://sheets.googleapis.com/v4/spreadsheets/{fid}"
+                   f"/values/{sheet_name}?valueRenderOption=UNFORMATTED_VALUE")
+            r = requests.get(url,
+                headers={"Authorization": f"Bearer {creds.token}"}, timeout=20)
+            if r.status_code != 200:
+                return None
+            data = r.json()
+            rows = data.get('values', [])
+            if len(rows) < 2:
+                return None
+            headers = [str(h).strip().lower() for h in rows[0]]
+            df_s = pd.DataFrame(rows[1:], columns=headers[:len(rows[1])]
+                                if len(rows)>1 else headers)
+            return df_s
+
+        def _get_sheet_names(fid):
+            """Get all sheet names from a Google Sheets file."""
+            url = f"https://sheets.googleapis.com/v4/spreadsheets/{fid}?fields=sheets.properties.title"
+            r = requests.get(url,
+                headers={"Authorization": f"Bearer {creds.token}"}, timeout=15)
+            if r.status_code != 200:
+                return []
+            return [s['properties']['title']
+                    for s in r.json().get('sheets', [])]
+
+        def _register_costs(df_s, source_label):
+            """Extract item code + net cost from a standardised sheet.
+            Supports two formats:
+            1. Simple: item code | net cost | supplier name
+            2. Ledger: Product No. | Cost Rate | Supplier (+ SQ.M, Qty etc.)
+            """
+            cols = [str(c).strip().lower() for c in df_s.columns]
+            df_s.columns = cols
+
+            # Format 1: simple supplier cost sheet
+            item_col = next((c for c in cols if 'item' in c and 'code' in c), None)
+            cost_col = next((c for c in cols if 'net' in c and 'cost' in c), None)
+            supp_col = next((c for c in cols if 'supplier' in c), None)
+
+            # Format 2: full ledger Purchases tab
+            if not item_col:
+                item_col = next((c for c in cols if c in ('product no.', 'product no', 'product_no')), None)
+            if not cost_col:
+                # Prefer 'cost rate' (actual purchase cost) over 'rate' (sale rate)
+                cost_col = next((c for c in cols if c == 'cost rate'), None)
+                if not cost_col:
+                    cost_col = next((c for c in cols if 'cost' in c and 'rate' in c), None)
+            if not supp_col:
+                supp_col = next((c for c in cols if c == 'supplier'), None)
+
+            if not item_col or not cost_col:
+                return 0, f"Missing columns (need Product No.+Cost Rate or item code+net cost). Found: {cols}"
+
+            df_s[cost_col] = pd.to_numeric(df_s[cost_col], errors='coerce')
+            df_s = df_s[df_s[cost_col].notna() & (df_s[cost_col] > 0)].copy()
+            df_s[item_col] = df_s[item_col].astype(str).apply(
+                lambda x: re.sub(r' +', ' ', x.replace(' ', ' ')).strip().upper())
+            df_s = df_s[df_s[item_col].str.len() > 2]
+
+            loaded = 0
+            for _, row in df_s.iterrows():
+                pno  = row[item_col]
+                cost = float(row[cost_col])
+                supp = str(row[supp_col]).strip() if supp_col else source_label
+                if pno in supplier_wac:
+                    supplier_wac[pno]['val'] += cost
+                    supplier_wac[pno]['sqm'] += 1
+                else:
+                    supplier_wac[pno] = {'sqm': 1, 'val': cost,
+                                         'supplier': supp or source_label}
+                supplier_match[pno] = 'exact'
+                loaded += 1
+            return loaded, None
+
+        # ── Read each supplier workbook ───────────────────────
         if supplier_file_ids:
             for fid in [x.strip() for x in supplier_file_ids.split(",") if x.strip()]:
                 try:
-                    s_url = f"https://docs.google.com/spreadsheets/d/{fid}/export?format=xlsx"
-                    s_resp = requests.get(s_url,
-                        headers={"Authorization": f"Bearer {creds.token}"}, timeout=30)
-                    if s_resp.status_code == 200:
-                        s_buf = io.BytesIO(s_resp.content)
-                        xl = pd.ExcelFile(s_buf)
-                        # Try known sheet names that contain purchase cost data
-                        for sheet in ['NEW', 'PURCHASES', 'Purchase', 'Data', xl.sheet_names[0]]:
-                            if sheet not in xl.sheet_names:
-                                continue
-                            s_df = pd.read_excel(s_buf, sheet_name=sheet)
-                            s_df.columns = [str(c).strip() for c in s_df.columns]
-                            # Find product no column
-                            prod_col = next((c for c in s_df.columns
-                                if 'product' in c.lower() and 'no' in c.lower()), None)
-                            # Find purchase rate column
-                            rate_col = next((c for c in s_df.columns
-                                if 'purchase rate' in c.lower() and 'box' not in c.lower()), None)
-                            # Find sqm column
-                            sqm_col  = next((c for c in s_df.columns
-                                if c.lower() in ['sq.m','sqm','sq m']), None)
-                            # Find type column
-                            type_col = next((c for c in s_df.columns
-                                if c.lower() == 'type'), None)
+                    sheet_names = _get_sheet_names(fid)
+                    # Accept: erp-purchases-1, erp-purchases-2 OR the ledger 'Purchases' tab
+                    erp_sheets = sorted([s for s in sheet_names
+                                         if re.match(r'erp-purchases-?\d*', s, re.IGNORECASE)])
+                    if not erp_sheets:
+                        # Fall back to ledger-style 'Purchases' tab
+                        erp_sheets = [s for s in sheet_names
+                                      if s.strip().lower() == 'purchases']
+                    if not erp_sheets:
+                        supplier_log.append((fid, '—', 0, 'No Purchases or erp-purchases sheets found'))
+                        continue
+                    for sheet in erp_sheets:
+                        df_s = _load_supplier_sheet(fid, sheet)
+                        if df_s is None:
+                            supplier_log.append((fid, sheet, 0, 'Empty or failed to load'))
+                            continue
+                        loaded, err = _register_costs(df_s, f"{fid}/{sheet}")
+                        supplier_log.append((fid, sheet, loaded, err or '✅'))
+                except Exception as ex:
+                    supplier_log.append((fid, '—', 0, str(ex)[:100]))
 
-                            if prod_col and rate_col and sqm_col:
-                                s_df[prod_col] = s_df[prod_col].apply(
-                                    lambda x: _re.sub(r' +',' ',str(x).replace(' ',' ')).strip().upper())
-                                s_df[rate_col] = pd.to_numeric(s_df[rate_col], errors='coerce').fillna(0)
-                                s_df[sqm_col]  = pd.to_numeric(s_df[sqm_col],  errors='coerce').fillna(0)
-                                # Filter to purchases only if type column exists
-                                if type_col:
-                                    s_df = s_df[s_df[type_col].astype(str).str.strip().isin(['P','p'])]
-                                s_df = s_df[(s_df[rate_col] > 0) & (s_df[sqm_col] > 0)]
-                                # WAC per product
-                                for pno, g in s_df.groupby(prod_col):
-                                    wac_s = (g[sqm_col]*g[rate_col]).sum() / g[sqm_col].sum()
-                                    if pno in supplier_wac:
-                                        # Blend with existing (weighted)
-                                        existing_sqm = supplier_wac[pno]['sqm']
-                                        existing_val = supplier_wac[pno]['val']
-                                        new_sqm = g[sqm_col].sum()
-                                        new_val = (g[sqm_col]*g[rate_col]).sum()
-                                        supplier_wac[pno] = {
-                                            'sqm': existing_sqm + new_sqm,
-                                            'val': existing_val + new_val
-                                        }
-                                    else:
-                                        supplier_wac[pno] = {
-                                            'sqm': g[sqm_col].sum(),
-                                            'val': (g[sqm_col]*g[rate_col]).sum()
-                                        }
-                                break  # Found good sheet, stop
-                except Exception:
-                    pass
+        # ── Read COST_OVERRIDES tab ───────────────────────────
+        # Manual fallback for products not in any supplier file
+        # Format: item code | net cost | supplier name | notes
+        if cost_override_id:
+            try:
+                ov_sheets = _get_sheet_names(cost_override_id)
+                if 'COST_OVERRIDES' in ov_sheets:
+                    df_ov = _load_supplier_sheet(cost_override_id, 'COST_OVERRIDES')
+                    if df_ov is not None:
+                        loaded_ov, _ = _register_costs(df_ov, 'MANUAL_OVERRIDE')
+                        for pno in supplier_wac:
+                            if supplier_wac[pno].get('supplier') == 'MANUAL_OVERRIDE':
+                                supplier_match[pno] = 'override'
+                        supplier_log.append((cost_override_id, 'COST_OVERRIDES',
+                                             loaded_ov, '✅ overrides'))
+            except Exception as ex:
+                supplier_log.append((cost_override_id, 'COST_OVERRIDES', 0, str(ex)[:100]))
+
+        # ── Fuzzy matching for unmatched products ─────────────
+        # Products in ERP not in supplier_wac — try name similarity
+        epr_products = set(df['Product No.'].str.upper().unique())
+        matched_products = set(supplier_wac.keys())
+        unmatched = epr_products - matched_products
+
+        if unmatched and supplier_wac:
+            from difflib import SequenceMatcher
+            matched_list = list(matched_products)
+            for pno in list(unmatched)[:2000]:  # cap for performance
+                best_ratio = 0.0
+                best_match = None
+                for cand in matched_list:
+                    r = SequenceMatcher(None, pno[:20], cand[:20]).ratio()
+                    if r > best_ratio:
+                        best_ratio = r
+                        best_match = cand
+                if best_ratio >= 0.85 and best_match:
+                    supplier_wac[pno] = {**supplier_wac[best_match],
+                                         'fuzzy_of': best_match,
+                                         'confidence': round(best_ratio*100, 1)}
+                    supplier_match[pno] = f'fuzzy({best_ratio*100:.0f}%)'
+
+        # Store log for Supplier Costs page
+        st.session_state['supplier_log'] = supplier_log
+
     except Exception:
         pass
+
+    # ── Build final cost map ──────────────────────────────────
+    supplier_wac_map = {}
+    supplier_source_map = {}
+    for pno, v in supplier_wac.items():
+        if v['sqm'] > 0:
+            supplier_wac_map[pno]    = round(v['val'] / v['sqm'], 2)
+            supplier_source_map[pno] = supplier_match.get(pno, 'exact')
+
+    if supplier_wac_map:
+        st.session_state['supplier_wac_map']    = supplier_wac_map
+        st.session_state['supplier_source_map'] = supplier_source_map
 
     # Build supplier WAC map
     supplier_wac_map = {
@@ -514,7 +621,7 @@ def build_pi(_df, _prod):
         total_months = _df['Date'].dt.to_period('M').nunique()
         cons = sdays/total_months*100 if total_months>0 else 0
         xyz  = 'X' if cons>=cfg['xyz_x_pct'] else ('Y' if cons>=cfg['xyz_y_pct'] else 'Z')
-        results.append({'Product No.':prod_no,'Velocity Drop %':round(_vdrop, 1),'First Purchase Date':fp.date() if pd.notna(fp) else None,
+        results.append({'Product No.':prod_no,'Velocity Drop %':round(vel_drop_ts,1),'First Purchase Date':fp.date() if pd.notna(fp) else None,
             'Last Sale Date':ls.date() if pd.notna(ls) else None,'Days in Inventory':di,
             'Days Since Last Sale':ds,'Total Sales Sqm':round(ts,2),'Net Sales Sqm':round(ns,2),
             'Sales Last 30 Days':round(s30,2),'Sales Last 90 Days':round(s90,2),
@@ -3806,17 +3913,36 @@ Your supplier files need a sheet with these columns (same as your ERP export):
     # ── Current Status ────────────────────────────────────────
     supplier_map = st.session_state.get('supplier_wac_map', {})
 
+    source_map = st.session_state.get('supplier_source_map', {})
+    supplier_log_data = st.session_state.get('supplier_log', [])
+
     if not supplier_map:
-        st.warning("No supplier cost data loaded. Add SUPPLIER_FILE_IDS to Streamlit secrets to enable real profit calculation.")
-        st.info("Currently using WAC ± adjustment estimate (4.7% local / 13% imported)")
+        st.warning("No supplier cost data loaded.")
+        st.info("""**To enable real profit calculation:**
+1. Add SUPPLIER_FILE_IDS to Streamlit secrets (comma-separated Google Sheet IDs)
+2. Each sheet must have tabs named `erp-purchases-1`, `erp-purchases-2` etc.
+3. Required columns: `item code`, `net cost`, `supplier name`""")
     else:
-        c1,c2,c3 = st.columns(3)
-        c1.metric("Products with Real Cost", f"{len(supplier_map):,}")
-        # Compare coverage
         total_products = pi['Product No.'].nunique()
+        exact   = sum(1 for v in source_map.values() if v == 'exact')
+        fuzzy   = sum(1 for v in source_map.values() if 'fuzzy' in str(v))
+        override= sum(1 for v in source_map.values() if v == 'override')
+        estimated = total_products - len(supplier_map)
+
+        c1,c2,c3,c4,c5 = st.columns(5)
+        c1.metric("✅ Exact Match",    f"{exact:,}",    help="Item code matched directly")
+        c2.metric("🔄 Fuzzy Match",    f"{fuzzy:,}",    help="Name similarity ≥ 85%")
+        c3.metric("✏️ Manual Override", f"{override:,}", help="Entered in COST_OVERRIDES tab")
+        c4.metric("⚠️ Estimated",      f"{estimated:,}", help="Using WAC ± adjustment")
         coverage = len(supplier_map)/total_products*100
-        c2.metric("Coverage", f"{coverage:.1f}%", help="% of products with actual supplier cost")
-        c3.metric("Remaining (estimated)", f"{total_products - len(supplier_map):,}")
+        c5.metric("📊 Coverage",       f"{coverage:.1f}%")
+
+        # Load log
+        if supplier_log_data:
+            with st.expander("📋 Supplier Load Log", expanded=False):
+                log_df = pd.DataFrame(supplier_log_data,
+                    columns=['File ID','Sheet','Rows Loaded','Status'])
+                st.dataframe(log_df, hide_index=True, use_container_width=True)
 
         st.divider()
 
