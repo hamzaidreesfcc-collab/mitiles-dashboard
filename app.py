@@ -882,6 +882,109 @@ with st.spinner("Loading Mi-Tiles data..."):
     pi       = build_pi(df, prod)
     pairs_df, size_pairs_df = build_pairs(df, prod)
 
+# ── Force supplier costs to reload if not yet in session ──
+if 'supplier_wac_map' not in st.session_state:
+    try:
+        import requests
+        from google.oauth2 import service_account
+        import google.auth.transport.requests
+        _creds = service_account.Credentials.from_service_account_info(
+            st.secrets["gcp_service_account"],
+            scopes=["https://www.googleapis.com/auth/spreadsheets.readonly",
+                    "https://www.googleapis.com/auth/drive.readonly"]
+        )
+        google.auth.transport.requests.Request()
+        _creds.refresh(google.auth.transport.requests.Request())
+
+        _supplier_wac   = {}
+        _supplier_match = {}
+        _supplier_log   = []
+
+        def _gs_get(url):
+            return requests.get(url, headers={"Authorization": f"Bearer {_creds.token}"}, timeout=20)
+
+        def _sheet_names(fid):
+            r = _gs_get(f"https://sheets.googleapis.com/v4/spreadsheets/{fid}?fields=sheets.properties.title")
+            if r.status_code != 200:
+                return []
+            return [s['properties']['title'] for s in r.json().get('sheets', [])]
+
+        def _load_tab(fid, tab):
+            r = _gs_get(f"https://sheets.googleapis.com/v4/spreadsheets/{fid}/values/{tab}?valueRenderOption=UNFORMATTED_VALUE")
+            if r.status_code != 200:
+                return None, f"HTTP {r.status_code}: {r.text[:100]}"
+            rows = r.json().get('values', [])
+            if len(rows) < 2:
+                return None, "Empty sheet"
+            cols = [str(h).strip().lower() for h in rows[0]]
+            df_s = pd.DataFrame(rows[1:], columns=cols[:len(rows[1])] if rows[1:] else cols)
+            return df_s, None
+
+        def _register(df_s, label):
+            cols = list(df_s.columns)
+            item_col = next((c for c in cols if 'item' in c and 'code' in c), None)
+            cost_col = next((c for c in cols if 'net' in c and 'cost' in c), None)
+            supp_col = next((c for c in cols if 'supplier' in c), None)
+            if not item_col:
+                item_col = next((c for c in cols if c in ('product no.','product no','product_no')), None)
+            if not cost_col:
+                cost_col = next((c for c in cols if c == 'cost rate'), None)
+                if not cost_col:
+                    cost_col = next((c for c in cols if 'cost' in c and 'rate' in c), None)
+            if not supp_col:
+                supp_col = next((c for c in cols if c == 'supplier'), None)
+            if not item_col or not cost_col:
+                return 0, f"Columns not found. Got: {cols}"
+            df_s[cost_col] = pd.to_numeric(df_s[cost_col], errors='coerce')
+            df_s = df_s[df_s[cost_col].notna() & (df_s[cost_col] > 0)].copy()
+            df_s[item_col] = df_s[item_col].astype(str).str.strip().str.upper()
+            df_s = df_s[df_s[item_col].str.len() > 2]
+            n = 0
+            for _, row in df_s.iterrows():
+                pno = row[item_col]; cost = float(row[cost_col])
+                supp = str(row[supp_col]).strip() if supp_col else label
+                if pno in _supplier_wac:
+                    _supplier_wac[pno]['val'] += cost; _supplier_wac[pno]['sqm'] += 1
+                else:
+                    _supplier_wac[pno] = {'sqm': 1, 'val': cost, 'supplier': supp}
+                _supplier_match[pno] = 'exact'; n += 1
+            return n, None
+
+        _fids = st.secrets.get("SUPPLIER_FILE_IDS", "")
+        if _fids:
+            for _fid in [x.strip() for x in _fids.split(",") if x.strip()]:
+                try:
+                    _tabs = _sheet_names(_fid)
+                    _purchase_tabs = sorted([t for t in _tabs if re.match(r'erp-purchases', t, re.IGNORECASE)])
+                    if not _purchase_tabs:
+                        _purchase_tabs = [t for t in _tabs if t.strip().lower() == 'purchases']
+                    if not _purchase_tabs:
+                        _supplier_log.append((_fid, '—', 0, f'No Purchases tab. Tabs found: {_tabs}'))
+                        continue
+                    for _tab in _purchase_tabs:
+                        _df_s, _err = _load_tab(_fid, _tab)
+                        if _df_s is None:
+                            _supplier_log.append((_fid, _tab, 0, _err))
+                            continue
+                        _n, _err2 = _register(_df_s, _fid)
+                        _supplier_log.append((_fid, _tab, _n, _err2 or '✅'))
+                except Exception as _ex:
+                    _supplier_log.append((_fid, '—', 0, str(_ex)[:200]))
+        else:
+            _supplier_log.append(('—', '—', 0, 'SUPPLIER_FILE_IDS secret is empty'))
+
+        st.session_state['supplier_log'] = _supplier_log
+        _wac_map = {}; _src_map = {}
+        for _pno, _v in _supplier_wac.items():
+            if _v['sqm'] > 0:
+                _wac_map[_pno] = round(_v['val'] / _v['sqm'], 2)
+                _src_map[_pno] = _supplier_match.get(_pno, 'exact')
+        if _wac_map:
+            st.session_state['supplier_wac_map']    = _wac_map
+            st.session_state['supplier_source_map'] = _src_map
+    except Exception as _top_ex:
+        st.session_state['supplier_log'] = [('FATAL', '—', 0, str(_top_ex)[:300])]
+
 # ─────────────────────────────────────────────
 # SIDEBAR
 # ─────────────────────────────────────────────
