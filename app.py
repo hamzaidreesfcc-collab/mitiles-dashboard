@@ -384,25 +384,17 @@ def load_data(path):
                 lambda x: re.sub(r' +', ' ', x.replace(' ', ' ')).strip().upper())
             df_s = df_s[df_s[item_col].str.len() > 2]
 
-            # Find Sq.m / Qty column for proper weighted average
-            _sqm_c = next((c for c in cols if c in ('sq.m','sqm','sq m','quantity','qty')), None)
-            if _sqm_c:
-                df_s[_sqm_c] = pd.to_numeric(df_s[_sqm_c], errors='coerce').fillna(0)
-
+            # Use last row per product = most recent purchase cost
+            # (sheet rows are purchase history; last entry = latest price)
             loaded = 0
             for _, row in df_s.iterrows():
                 pno  = row[item_col]
                 cost = float(row[cost_col])
                 supp = str(row[supp_col]).strip() if supp_col else source_label
-                qty  = float(row[_sqm_c]) if _sqm_c and pd.notna(row.get(_sqm_c, None)) and float(row[_sqm_c]) > 0 else 1.0
-                if pno in supplier_wac:
-                    supplier_wac[pno]['val'] += cost * qty
-                    supplier_wac[pno]['sqm'] += qty
-                    supplier_wac[pno]['last_cost'] = cost
-                else:
-                    supplier_wac[pno] = {'sqm': qty, 'val': cost * qty,
-                                         'last_cost': cost,
-                                         'supplier': supp or source_label}
+                # Always overwrite — last row for this product wins (most recent)
+                supplier_wac[pno] = {'sqm': 1, 'val': cost,
+                                     'last_cost': cost,
+                                     'supplier': supp or source_label}
                 supplier_match[pno] = 'exact'
                 loaded += 1
             return loaded, None
@@ -947,24 +939,15 @@ if 'supplier_wac_map' not in st.session_state:
             df_s = df_s[df_s[cost_col].notna() & (df_s[cost_col] > 0)].copy()
             df_s[item_col] = df_s[item_col].astype(str).str.strip().str.upper()
             df_s = df_s[df_s[item_col].str.len() > 2]
-            # Try to find Sq.m / Qty column for weighted average
-            sqm_col = next((c for c in cols if c in ('sq.m','sqm','sq m','quantity','qty')), None)
-            if sqm_col:
-                df_s[sqm_col] = pd.to_numeric(df_s[sqm_col], errors='coerce').fillna(0)
+            # Use last row per product = most recent purchase cost
+            # (sheet rows are purchase history; last entry = latest price)
             n = 0
             for _, row in df_s.iterrows():
                 pno  = row[item_col]; cost = float(row[cost_col])
                 supp = str(row[supp_col]).strip() if supp_col else label
-                qty  = float(row[sqm_col]) if sqm_col and row[sqm_col] > 0 else 1.0
-                if pno in _supplier_wac:
-                    # Weighted accumulation: val = Σ(cost×qty), sqm = Σqty
-                    _supplier_wac[pno]['val'] += cost * qty
-                    _supplier_wac[pno]['sqm'] += qty
-                    # Also track last seen cost in case qty is unreliable
-                    _supplier_wac[pno]['last_cost'] = cost
-                else:
-                    _supplier_wac[pno] = {'sqm': qty, 'val': cost * qty,
-                                          'last_cost': cost, 'supplier': supp}
+                # Always overwrite — last row for this product wins (most recent)
+                _supplier_wac[pno] = {'sqm': 1, 'val': cost,
+                                      'last_cost': cost, 'supplier': supp}
                 _supplier_match[pno] = 'exact'; n += 1
             return n, None
 
@@ -1424,7 +1407,13 @@ Products dead 1-2 years: {((dead['Days Since Last Sale']>365)&(dead['Days Since 
 elif page == "✅ Fast Movers":
     st.title("✅ Fast Movers")
     with st.expander("🔍 Filters", expanded=True):
-        flt = pi_filters(pi, "fm")
+        _fm_min = df['Date'].min().date(); _fm_max = df['Date'].max().date()
+        _fm_dr = st.date_input("📅 Date Range", value=(_fm_min, _fm_max), min_value=_fm_min, max_value=_fm_max, key="fm_date")
+        _fm_df = df.copy()
+        if len(_fm_dr)==2:
+            _fm_df = _fm_df[(_fm_df['Date'].dt.date>=_fm_dr[0])&(_fm_df['Date'].dt.date<=_fm_dr[1])]
+        _fm_pi = pi if (_fm_dr[0]==_fm_min and _fm_dr[1]==_fm_max and len(_fm_dr)==2) else build_pi(_fm_df, prod)
+        flt = pi_filters(_fm_pi, "fm")
     fast = flt[flt['Demand Pattern'].isin(['Stable Fast Mover','Volatile Fast Mover'])].copy().sort_values('Sales Velocity/Month',ascending=False)
     c1,c2,c3 = st.columns(3)
     c1.metric("Fast Moving Products",f"{len(fast):,}"); c2.metric("Total Sales Velocity",f"{fast['Sales Velocity/Month'].sum():,.0f} sqm/month"); c3.metric("Reorder Alerts",f"{(fast['Stock Health']=='Reorder Now').sum():,}")
@@ -1440,7 +1429,13 @@ elif page == "✅ Fast Movers":
 elif page == "📦 Product Intelligence":
     st.title("📦 Product Intelligence")
     with st.expander("🔍 Filters", expanded=True):
-        flt = pi_filters(pi, "pi")
+        _pi_min = df['Date'].min().date(); _pi_max = df['Date'].max().date()
+        _pi_dr = st.date_input("📅 Date Range", value=(_pi_min, _pi_max), min_value=_pi_min, max_value=_pi_max, key="pi_date")
+        _pi_df = df.copy()
+        if len(_pi_dr)==2:
+            _pi_df = _pi_df[(_pi_df['Date'].dt.date>=_pi_dr[0])&(_pi_df['Date'].dt.date<=_pi_dr[1])]
+        _pi_src = pi if (len(_pi_dr)==2 and _pi_dr[0]==_pi_min and _pi_dr[1]==_pi_max) else build_pi(_pi_df, prod)
+        flt = pi_filters(_pi_src, "pi")
         c1,c2 = st.columns(2)
         with c1:
             pat_f = st.selectbox("Demand Pattern", ['All']+sorted(pi['Demand Pattern'].dropna().unique().tolist()), key="pi_pat")
@@ -1861,7 +1856,13 @@ elif page == "🔮 Demand Forecast":
             "Prophet ML forecasting will be enabled in ~8 months once 2+ full years of data exist per product. "
             "Current data (14–26 months per SKU) is insufficient for reliable seasonal ML forecasting.")
     with st.expander("🔍 Filters", expanded=True):
-        flt=pi_filters(pi,"df")
+        _df_min = df['Date'].min().date(); _df_max = df['Date'].max().date()
+        _df_dr = st.date_input("📅 Date Range", value=(_df_min, _df_max), min_value=_df_min, max_value=_df_max, key="dfc_date")
+        _dfc_df = df.copy()
+        if len(_df_dr)==2:
+            _dfc_df = _dfc_df[(_dfc_df['Date'].dt.date>=_df_dr[0])&(_dfc_df['Date'].dt.date<=_df_dr[1])]
+        _dfc_pi = pi if (len(_df_dr)==2 and _df_dr[0]==_df_min and _df_dr[1]==_df_max) else build_pi(_dfc_df, prod)
+        flt=pi_filters(_dfc_pi,"df")
     fast=flt[flt['Demand Pattern'].isin(['Stable Fast Mover','Volatile Fast Mover','Slow Stable'])].copy()
     fast=fast[fast['Sales Velocity/Month']>0]
     fast['Forecast 30 Days']=(fast['Sales Velocity/Month']*1).round(2)
