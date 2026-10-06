@@ -384,16 +384,24 @@ def load_data(path):
                 lambda x: re.sub(r' +', ' ', x.replace(' ', ' ')).strip().upper())
             df_s = df_s[df_s[item_col].str.len() > 2]
 
+            # Find Sq.m / Qty column for proper weighted average
+            _sqm_c = next((c for c in cols if c in ('sq.m','sqm','sq m','quantity','qty')), None)
+            if _sqm_c:
+                df_s[_sqm_c] = pd.to_numeric(df_s[_sqm_c], errors='coerce').fillna(0)
+
             loaded = 0
             for _, row in df_s.iterrows():
                 pno  = row[item_col]
                 cost = float(row[cost_col])
                 supp = str(row[supp_col]).strip() if supp_col else source_label
+                qty  = float(row[_sqm_c]) if _sqm_c and pd.notna(row.get(_sqm_c, None)) and float(row[_sqm_c]) > 0 else 1.0
                 if pno in supplier_wac:
-                    supplier_wac[pno]['val'] += cost
-                    supplier_wac[pno]['sqm'] += 1
+                    supplier_wac[pno]['val'] += cost * qty
+                    supplier_wac[pno]['sqm'] += qty
+                    supplier_wac[pno]['last_cost'] = cost
                 else:
-                    supplier_wac[pno] = {'sqm': 1, 'val': cost,
+                    supplier_wac[pno] = {'sqm': qty, 'val': cost * qty,
+                                         'last_cost': cost,
                                          'supplier': supp or source_label}
                 supplier_match[pno] = 'exact'
                 loaded += 1
@@ -939,14 +947,24 @@ if 'supplier_wac_map' not in st.session_state:
             df_s = df_s[df_s[cost_col].notna() & (df_s[cost_col] > 0)].copy()
             df_s[item_col] = df_s[item_col].astype(str).str.strip().str.upper()
             df_s = df_s[df_s[item_col].str.len() > 2]
+            # Try to find Sq.m / Qty column for weighted average
+            sqm_col = next((c for c in cols if c in ('sq.m','sqm','sq m','quantity','qty')), None)
+            if sqm_col:
+                df_s[sqm_col] = pd.to_numeric(df_s[sqm_col], errors='coerce').fillna(0)
             n = 0
             for _, row in df_s.iterrows():
-                pno = row[item_col]; cost = float(row[cost_col])
+                pno  = row[item_col]; cost = float(row[cost_col])
                 supp = str(row[supp_col]).strip() if supp_col else label
+                qty  = float(row[sqm_col]) if sqm_col and row[sqm_col] > 0 else 1.0
                 if pno in _supplier_wac:
-                    _supplier_wac[pno]['val'] += cost; _supplier_wac[pno]['sqm'] += 1
+                    # Weighted accumulation: val = Σ(cost×qty), sqm = Σqty
+                    _supplier_wac[pno]['val'] += cost * qty
+                    _supplier_wac[pno]['sqm'] += qty
+                    # Also track last seen cost in case qty is unreliable
+                    _supplier_wac[pno]['last_cost'] = cost
                 else:
-                    _supplier_wac[pno] = {'sqm': 1, 'val': cost, 'supplier': supp}
+                    _supplier_wac[pno] = {'sqm': qty, 'val': cost * qty,
+                                          'last_cost': cost, 'supplier': supp}
                 _supplier_match[pno] = 'exact'; n += 1
             return n, None
 
@@ -1007,6 +1025,7 @@ with st.sidebar:
         "📦 Closing Stock","📋 Income Statement","🏦 Assets Position",
         "📊 Salesman Rate Analysis","🤖 ML Model Health",
         "🎨 Design Brief Tool","🔍 Product Audit","💡 Investment Advisor","📋 Audit Log","💰 Supplier Costs","📖 Formula Guide","⚙️ Metrics Config","⚔️ Product Showdown","👻 Ghost Performers","🟣 Tail Stock",
+        "📋 Sales & Profit Report",
     ]
     _role = st.session_state.get('role','viewer')
     _allowed = _all_pages if ROLE_PAGES.get(_role)=="all" else ROLE_PAGES.get(_role, _all_pages[:3])
@@ -5297,3 +5316,202 @@ elif page == "⚙️ Metrics Config":
         with st.expander("📋 Export current config"):
             import json
             st.code(json.dumps(cfg, indent=2), language='json')
+
+# ─────────────────────────────────────────────
+# PAGE — SALES & PROFIT REPORT
+# ─────────────────────────────────────────────
+elif page == "📋 Sales & Profit Report":
+    st.title("📋 Sales & Profit Report")
+    st.caption("All-time sales data with date range filter, profit columns, and full drill-down. Export to CSV.")
+
+    with st.expander("🔍 Filters", expanded=True):
+        # ── Row 1: Date + Warehouse ──
+        c1, c2 = st.columns([3, 1])
+        with c1:
+            _min_d = df['Date'].min().date(); _max_d = df['Date'].max().date()
+            _dr = st.date_input("📅 Date Range", value=(_min_d, _max_d),
+                                min_value=_min_d, max_value=_max_d, key="spr_date")
+        with c2:
+            _wh = st.selectbox("Warehouse", ['All'] + sorted(df['Warehouse'].dropna().unique().tolist()), key="spr_wh")
+
+        # ── Row 2: Brand / Company / Category / Size ──
+        c1, c2, c3, c4 = st.columns(4)
+        with c1:
+            _br = st.selectbox("Brand", ['All'] + sorted(df['Brand Name'].dropna().unique().tolist()), key="spr_br")
+        with c2:
+            _co = st.selectbox("Company", ['All'] + sorted(df['Company Name'].dropna().unique().tolist()), key="spr_co")
+        with c3:
+            _cat = st.selectbox("Category", ['All'] + sorted(df['Category'].dropna().unique().tolist()), key="spr_cat")
+        with c4:
+            _sz = st.selectbox("Size", ['All'] + sorted(prod['Size'].dropna().unique().tolist()), key="spr_sz")
+
+        # ── Row 3: Salesman / Product ──
+        c1, c2 = st.columns(2)
+        with c1:
+            _sal = st.selectbox("Salesman", ['All'] + sorted(df['Salesman'].dropna().unique().tolist()), key="spr_sal")
+        with c2:
+            _prod_list = ['All'] + sorted(df['Product No.'].dropna().unique().tolist())
+            _prod = st.selectbox("Product No.", _prod_list, key="spr_prod")
+
+        # ── Row 4: View mode ──
+        c1, c2 = st.columns(2)
+        with c1:
+            _view = st.radio("Group By", ["Product", "Month", "Brand", "Category", "Salesman", "Transaction Lines"],
+                             horizontal=True, key="spr_view")
+        with c2:
+            _type = st.radio("Transaction Type", ["Sales Only", "Returns Only", "Both"], horizontal=True, key="spr_type")
+
+    # ── Apply filters ──────────────────────────────────────────
+    _dff = df.copy()
+    if len(_dr) == 2:
+        _s, _e = _dr
+        _dff = _dff[(_dff['Date'].dt.date >= _s) & (_dff['Date'].dt.date <= _e)]
+    if _wh  != 'All': _dff = _dff[_dff['Warehouse']    == _wh]
+    if _br  != 'All': _dff = _dff[_dff['Brand Name']   == _br]
+    if _co  != 'All': _dff = _dff[_dff['Company Name'] == _co]
+    if _cat != 'All': _dff = _dff[_dff['Category']     == _cat]
+    if _sal != 'All': _dff = _dff[_dff['Salesman']     == _sal]
+    if _prod != 'All': _dff = _dff[_dff['Product No.'] == _prod]
+    # Size is on prod table — merge-filter
+    if _sz != 'All':
+        _sz_prods = prod[prod['Size'] == _sz]['Product No.'].tolist()
+        _dff = _dff[_dff['Product No.'].isin(_sz_prods)]
+
+    # Type filter
+    if _type == "Sales Only":    _dff = _dff[_dff['Type'] == 'S']
+    elif _type == "Returns Only": _dff = _dff[_dff['Type'] == 'S.R']
+    # Both = keep all
+
+    _sales_d   = _dff[_dff['Type'] == 'S']
+    _returns_d = _dff[_dff['Type'] == 'S.R']
+
+    # ── KPI strip ──────────────────────────────────────────────
+    _gross_val  = _sales_d['SALE'].sum()
+    _ret_val    = _returns_d['RETURN'].sum()
+    _net_val    = _gross_val - _ret_val
+    _gross_sqm  = _sales_d['Sq.m'].sum()
+    _ret_sqm    = _returns_d['Sq.m'].sum()
+    _net_sqm    = _gross_sqm - _ret_sqm
+    _erp_p      = _sales_d['Profit'].sum()
+    _act_p      = _sales_d['Actual Profit'].sum() if 'Actual Profit' in _sales_d.columns else 0
+    _erp_m_pct  = (_erp_p / _gross_val * 100) if _gross_val > 0 else 0
+    _act_m_pct  = (_act_p / _gross_val * 100) if _gross_val > 0 else 0
+
+    st.divider()
+    k1, k2, k3, k4, k5, k6 = st.columns(6)
+    k1.metric("Gross Sale Value",  fmt_m(_gross_val))
+    k2.metric("Returns",           fmt_m(_ret_val))
+    k3.metric("Net Sale Value",    fmt_m(_net_val))
+    k4.metric("Net Sqm",           f"{_net_sqm:,.1f}")
+    k5.metric("ERP Profit",        fmt_m(_erp_p), f"{_erp_m_pct:.1f}%")
+    if is_admin:
+        k6.metric("Actual Profit", fmt_m(_act_p), f"{_act_m_pct:.1f}%")
+    else:
+        k6.metric("Bills", f"{_sales_d['Bill No.'].nunique():,}")
+
+    st.divider()
+
+    # ── Grouped tables ─────────────────────────────────────────
+    def _build_group(grp_col, data_s, data_r):
+        _g = data_s.groupby(grp_col).agg(
+            Sale_Val=('SALE','sum'), Sale_Sqm=('Sq.m','sum'),
+            ERP_P=('Profit','sum'), Act_P=('Actual Profit','sum') if 'Actual Profit' in data_s.columns else ('Profit','sum'),
+            Bills=('Bill No.','nunique'), Txns=('Bill No.','count')
+        ).reset_index()
+        _r = data_r.groupby(grp_col).agg(Ret_Val=('RETURN','sum'), Ret_Sqm=('Sq.m','sum')).reset_index()
+        _g = _g.merge(_r, on=grp_col, how='left').fillna(0)
+        _g['Net Value']  = _g['Sale_Val'] - _g['Ret_Val']
+        _g['Net Sqm']    = _g['Sale_Sqm'] - _g['Ret_Sqm']
+        _g['ERP M%']     = (_g['ERP_P'] / _g['Sale_Val'].replace(0, np.nan) * 100).round(1).fillna(0)
+        _g['Sale Value'] = _g['Sale_Val'].apply(fmt_m)
+        _g['Returns']    = _g['Ret_Val'].apply(fmt_m)
+        _g['Net']        = _g['Net Value'].apply(fmt_m)
+        _g['ERP Profit'] = _g['ERP_P'].apply(fmt_m)
+        _cols = [grp_col, 'Sale Value', 'Sale_Sqm', 'Returns', 'Ret_Sqm', 'Net', 'Net Sqm', 'ERP Profit', 'ERP M%', 'Bills']
+        if is_admin:
+            _g['Act M%']     = (_g['Act_P'] / _g['Sale_Val'].replace(0, np.nan) * 100).round(1).fillna(0)
+            _g['Act Profit'] = _g['Act_P'].apply(fmt_m)
+            _cols += ['Act Profit', 'Act M%']
+        # Totals row
+        _tot = {c: '' for c in _cols}
+        _tot[grp_col] = '📊 TOTAL'
+        _tot['Sale Value']  = fmt_m(_g['Sale_Val'].sum())
+        _tot['Sale_Sqm']    = round(_g['Sale_Sqm'].sum(), 1)
+        _tot['Returns']     = fmt_m(_g['Ret_Val'].sum())
+        _tot['Ret_Sqm']     = round(_g['Ret_Sqm'].sum(), 1)
+        _tot['Net']         = fmt_m(_g['Net Value'].sum())
+        _tot['Net Sqm']     = round(_g['Net Sqm'].sum(), 1)
+        _tot['ERP Profit']  = fmt_m(_g['ERP_P'].sum())
+        _tot['Bills']       = int(_g['Bills'].sum())
+        _sv = _g['Sale_Val'].sum()
+        _tot['ERP M%']      = round(_g['ERP_P'].sum() / _sv * 100, 1) if _sv > 0 else 0
+        if is_admin:
+            _tot['Act Profit'] = fmt_m(_g['Act_P'].sum())
+            _tot['Act M%']     = round(_g['Act_P'].sum() / _sv * 100, 1) if _sv > 0 else 0
+        _out = _g[_cols].sort_values('Sale_Val', ascending=False) if grp_col != 'Month' else _g[_cols].sort_values(grp_col)
+        return pd.concat([_out, pd.DataFrame([_tot])], ignore_index=True), _g
+
+    if _view == "Transaction Lines":
+        st.subheader("📄 Transaction Lines")
+        _txn = _dff.copy()
+        _show_cols = ['Date', 'Bill No.', 'Product No.', 'Brand Name', 'Category', 'Size',
+                      'Salesman', 'Warehouse', 'Company Name', 'Sq.m', 'SALE', 'RETURN',
+                      'Type', 'Profit']
+        if is_admin and 'Actual Profit' in _txn.columns:
+            _show_cols.append('Actual Profit')
+        _avail = [c for c in _show_cols if c in _txn.columns]
+        st.dataframe(_txn[_avail].sort_values('Date', ascending=False), hide_index=True, use_container_width=True)
+        st.download_button("📥 Download Lines CSV", _txn[_avail].to_csv(index=False),
+                           "transaction_lines.csv", "text/csv")
+
+    elif _view == "Product":
+        st.subheader("📦 By Product")
+        # Merge brand/category/size onto sales
+        _s2 = _sales_d.copy()
+        _r2 = _returns_d.copy()
+        _tbl, _raw = _build_group('Product No.', _s2, _r2)
+        # Add product meta
+        _meta = prod[['Product No.', 'Brand Name', 'Category', 'Size']].drop_duplicates('Product No.')
+        _tbl = _tbl.merge(_meta, on='Product No.', how='left')
+        _base_cols = ['Product No.', 'Brand Name', 'Category', 'Size']
+        _rest = [c for c in _tbl.columns if c not in _base_cols + ['Sale_Val', 'Act_P', 'ERP_P', 'Ret_Val', 'Sale_Sqm', 'Ret_Sqm', 'Net Value', 'Net Sqm', 'Txns']]
+        _display_cols = _base_cols + [c for c in _rest if c not in _base_cols]
+        st.dataframe(_tbl[[c for c in _display_cols if c in _tbl.columns]], hide_index=True, use_container_width=True)
+        st.download_button("📥 Download CSV", _raw.to_csv(index=False), "product_report.csv", "text/csv")
+
+    elif _view == "Month":
+        st.subheader("📅 By Month")
+        _tbl, _raw = _build_group('Month', _sales_d, _returns_d)
+        st.dataframe(_tbl, hide_index=True, use_container_width=True)
+        # Chart
+        _chart_d = _raw.sort_values('Month')
+        try:
+            import plotly.graph_objects as go
+            fig = go.Figure()
+            fig.add_bar(x=_chart_d['Month'], y=_chart_d['Sale_Val'], name='Sale Value')
+            fig.add_bar(x=_chart_d['Month'], y=_chart_d['ERP_P'],    name='ERP Profit')
+            if is_admin and 'Act_P' in _chart_d.columns:
+                fig.add_bar(x=_chart_d['Month'], y=_chart_d['Act_P'], name='Actual Profit')
+            fig.update_layout(barmode='group', height=350, margin=dict(t=20,b=20))
+            st.plotly_chart(fig, use_container_width=True)
+        except Exception:
+            st.bar_chart(_chart_d.set_index('Month')[['Sale_Val','ERP_P']])
+        st.download_button("📥 Download CSV", _raw.to_csv(index=False), "monthly_report.csv", "text/csv")
+
+    elif _view == "Brand":
+        st.subheader("🏷️ By Brand")
+        _tbl, _raw = _build_group('Brand Name', _sales_d, _returns_d)
+        st.dataframe(_tbl, hide_index=True, use_container_width=True)
+        st.download_button("📥 Download CSV", _raw.to_csv(index=False), "brand_report.csv", "text/csv")
+
+    elif _view == "Category":
+        st.subheader("📂 By Category")
+        _tbl, _raw = _build_group('Category', _sales_d, _returns_d)
+        st.dataframe(_tbl, hide_index=True, use_container_width=True)
+        st.download_button("📥 Download CSV", _raw.to_csv(index=False), "category_report.csv", "text/csv")
+
+    elif _view == "Salesman":
+        st.subheader("🧑‍💼 By Salesman")
+        _tbl, _raw = _build_group('Salesman', _sales_d, _returns_d)
+        st.dataframe(_tbl, hide_index=True, use_container_width=True)
+        st.download_button("📥 Download CSV", _raw.to_csv(index=False), "salesman_report.csv", "text/csv")
