@@ -5542,6 +5542,31 @@ elif page == "📋 Sales & Profit Report":
         _out = _g_disp[_cols]  # drop Sale_Val after sorting
         return pd.concat([_out, pd.DataFrame([_tot])], ignore_index=True), _g
 
+    # ── Drill-down helper (defined before the if/elif chain) ────
+    def _show_drilldown(filter_col, filter_val, label):
+        """Show transaction-level detail for a selected row."""
+        with st.expander(f"🔍 Drill-down: {label}", expanded=True):
+            _dd_s = _sales_d[_sales_d[filter_col] == filter_val].copy() if filter_col in _sales_d.columns else _sales_d.copy()
+            _dd_r = _returns_d[_returns_d[filter_col] == filter_val].copy() if filter_col in _returns_d.columns else _returns_d.copy()
+            _dd_all = pd.concat([_dd_s, _dd_r], ignore_index=True).sort_values('Date', ascending=False)
+            _da, _db, _dc, _dd2, _de = st.columns(5)
+            _da.metric("Sale Value",   fmt_m(_dd_s['SALE'].sum()))
+            _db.metric("Sale Sqm",     f"{_dd_s['Sq.m'].sum():,.1f}")
+            _dc.metric("Returns",      fmt_m(_dd_r['RETURN'].sum()))
+            _dd2.metric("Net Sqm",     f"{_dd_s['Sq.m'].sum()-_dd_r['Sq.m'].sum():,.1f}")
+            _erp_p = _dd_s['Profit'].sum() if 'Profit' in _dd_s.columns else 0
+            _sv_dd  = _dd_s['SALE'].sum()
+            _de.metric("ERP Margin%",  f"{_erp_p/_sv_dd*100:.1f}%" if _sv_dd > 0 else "—")
+            _bill_cols = ['Date', 'Bill No.', 'Account Name', 'Salesman', 'Sq.m', 'SALE', 'RETURN', 'Profit', 'Type']
+            if is_admin and 'Actual Profit' in _dd_all.columns:
+                _bill_cols.append('Actual Profit')
+            _avail_dd = [c for c in _bill_cols if c in _dd_all.columns]
+            st.dataframe(_dd_all[_avail_dd], hide_index=True, use_container_width=True)
+            st.caption(f"{len(_dd_all)} transaction lines | {_dd_s['Bill No.'].nunique() if 'Bill No.' in _dd_s.columns else '—'} bills")
+            st.download_button("📥 Download drill-down CSV", _dd_all[_avail_dd].to_csv(index=False),
+                               f"drilldown_{str(filter_val)[:20]}.csv", "text/csv",
+                               key=f"dd_dl_{filter_col}_{str(filter_val)[:30]}")
+
     if _view == "Transaction Lines":
         st.subheader("📄 Transaction Lines")
         _txn = _dff.copy()
@@ -5557,24 +5582,40 @@ elif page == "📋 Sales & Profit Report":
 
     elif _view == "Product":
         st.subheader("📦 By Product")
-        # Merge brand/category/size onto sales
         _s2 = _sales_d.copy()
         _r2 = _returns_d.copy()
         _tbl, _raw = _build_group('Product No.', _s2, _r2)
-        # Add product meta
         _meta = prod[['Product No.', 'Brand Name', 'Category', 'Size']].drop_duplicates('Product No.')
         _tbl = _tbl.merge(_meta, on='Product No.', how='left')
         _base_cols = ['Product No.', 'Brand Name', 'Category', 'Size']
-        _rest = [c for c in _tbl.columns if c not in _base_cols + ['Sale_Val', 'Act_P', 'ERP_P', 'Ret_Val', 'Sale_Sqm', 'Ret_Sqm', 'Net Value', 'Net Sqm', 'Txns']]
+        _rest = [c for c in _tbl.columns if c not in _base_cols + ['Sale_Val', 'Act_P', 'ERP_P', 'Ret_Val', 'Net Value', 'Txns']]
         _display_cols = _base_cols + [c for c in _rest if c not in _base_cols]
-        st.dataframe(_tbl[[c for c in _display_cols if c in _tbl.columns]], hide_index=True, use_container_width=True)
+        _disp_tbl = _tbl[[c for c in _display_cols if c in _tbl.columns]].reset_index(drop=True)
+        st.caption("👆 Click a row to see transaction detail for that product")
+        _sel_prod = st.dataframe(_disp_tbl, hide_index=True, use_container_width=True,
+                                 on_select="rerun", selection_mode="single-row")
+        _prod_rows = _sel_prod.selection.get("rows", []) if hasattr(_sel_prod, "selection") else []
+        if _prod_rows:
+            _sel_idx = _prod_rows[0]
+            _sel_pno = _disp_tbl.iloc[_sel_idx]['Product No.']
+            if _sel_pno != '📊 TOTAL':
+                _show_drilldown('Product No.', _sel_pno, _sel_pno)
         st.download_button("📥 Download CSV", _raw.to_csv(index=False), "product_report.csv", "text/csv")
 
     elif _view == "Month":
         st.subheader("📅 By Month")
         _tbl, _raw = _build_group('Month', _sales_d, _returns_d)
-        st.dataframe(_tbl, hide_index=True, use_container_width=True)
-        # Chart
+        _tbl_m = _tbl.reset_index(drop=True)
+        st.caption("👆 Click a month row to see its transaction detail")
+        _sel_month = st.dataframe(_tbl_m, hide_index=True, use_container_width=True,
+                                  on_select="rerun", selection_mode="single-row")
+        _month_rows = _sel_month.selection.get("rows", []) if hasattr(_sel_month, "selection") else []
+        if _month_rows:
+            _sel_m = _tbl_m.iloc[_month_rows[0]]['Month']
+            if _sel_m != '📊 TOTAL':
+                _s_m = _sales_d[_sales_d['Month'] == _sel_m]
+                _r_m = _returns_d[_returns_d['Month'] == _sel_m] if 'Month' in _returns_d.columns else _returns_d.iloc[0:0]
+                _show_drilldown('Month', _sel_m, str(_sel_m))
         _chart_d = _raw.sort_values('Month')
         try:
             import plotly.graph_objects as go
@@ -5592,17 +5633,41 @@ elif page == "📋 Sales & Profit Report":
     elif _view == "Brand":
         st.subheader("🏷️ By Brand")
         _tbl, _raw = _build_group('Brand Name', _sales_d, _returns_d)
-        st.dataframe(_tbl, hide_index=True, use_container_width=True)
+        _tbl_b = _tbl.reset_index(drop=True)
+        st.caption("👆 Click a brand row to see its transaction detail")
+        _sel_brand = st.dataframe(_tbl_b, hide_index=True, use_container_width=True,
+                                  on_select="rerun", selection_mode="single-row")
+        _brand_rows = _sel_brand.selection.get("rows", []) if hasattr(_sel_brand, "selection") else []
+        if _brand_rows:
+            _sel_b = _tbl_b.iloc[_brand_rows[0]]['Brand Name']
+            if _sel_b != '📊 TOTAL':
+                _show_drilldown('Brand Name', _sel_b, _sel_b)
         st.download_button("📥 Download CSV", _raw.to_csv(index=False), "brand_report.csv", "text/csv")
 
     elif _view == "Category":
         st.subheader("📂 By Category")
         _tbl, _raw = _build_group('Category', _sales_d, _returns_d)
-        st.dataframe(_tbl, hide_index=True, use_container_width=True)
+        _tbl_c = _tbl.reset_index(drop=True)
+        st.caption("👆 Click a category row to see its transaction detail")
+        _sel_cat = st.dataframe(_tbl_c, hide_index=True, use_container_width=True,
+                                on_select="rerun", selection_mode="single-row")
+        _cat_rows = _sel_cat.selection.get("rows", []) if hasattr(_sel_cat, "selection") else []
+        if _cat_rows:
+            _sel_c = _tbl_c.iloc[_cat_rows[0]]['Category']
+            if _sel_c != '📊 TOTAL':
+                _show_drilldown('Category', _sel_c, _sel_c)
         st.download_button("📥 Download CSV", _raw.to_csv(index=False), "category_report.csv", "text/csv")
 
     elif _view == "Salesman":
         st.subheader("🧑‍💼 By Salesman")
         _tbl, _raw = _build_group('Salesman', _sales_d, _returns_d)
-        st.dataframe(_tbl, hide_index=True, use_container_width=True)
+        _tbl_sm = _tbl.reset_index(drop=True)
+        st.caption("👆 Click a salesman row to see their transaction detail")
+        _sel_sm = st.dataframe(_tbl_sm, hide_index=True, use_container_width=True,
+                               on_select="rerun", selection_mode="single-row")
+        _sm_rows = _sel_sm.selection.get("rows", []) if hasattr(_sel_sm, "selection") else []
+        if _sm_rows:
+            _sel_s = _tbl_sm.iloc[_sm_rows[0]]['Salesman']
+            if _sel_s != '📊 TOTAL':
+                _show_drilldown('Salesman', _sel_s, _sel_s)
         st.download_button("📥 Download CSV", _raw.to_csv(index=False), "salesman_report.csv", "text/csv")
