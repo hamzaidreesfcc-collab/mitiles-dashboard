@@ -351,51 +351,80 @@ def load_data(path):
                     for s in r.json().get('sheets', [])]
 
         def _register_costs(df_s, source_label):
-            """Extract item code + net cost from a standardised sheet.
-            Supports two formats:
-            1. Simple: item code | net cost | supplier name
-            2. Ledger: Product No. | Cost Rate | Supplier (+ SQ.M, Qty etc.)
+            """FIFO costing per full product name.
+            Full product name (code + description) is the key so variants like
+            'MSM1282 MONTAGE SILKY MATT TONE H2' and 'MSM1282 MONTAGE SILKY MATT (COMM)'
+            are treated as completely separate products.
+            Batches stored oldest-first; FIFO cost = oldest batch cost.
+            Formats supported:
+            1. Simple: item code | [item name] | net cost | supplier
+            2. Ledger: Product No. | Cost Rate | Supplier (+ SQ.M, Date etc.)
             """
             cols = [str(c).strip().lower() for c in df_s.columns]
             df_s.columns = cols
 
-            # Format 1: simple supplier cost sheet
+            # ── Column detection ──────────────────────────────────
             item_col = next((c for c in cols if 'item' in c and 'code' in c), None)
-            cost_col = next((c for c in cols if 'net' in c and 'cost' in c), None)
-            supp_col = next((c for c in cols if 'supplier' in c), None)
-
-            # Format 2: full ledger Purchases tab
             if not item_col:
                 item_col = next((c for c in cols if c in ('product no.', 'product no', 'product_no')), None)
+
+            # Optional: separate item name/description column
+            name_col = next((c for c in cols if ('item' in c and 'name' in c)
+                             or ('product' in c and 'name' in c)
+                             or c in ('description', 'item desc', 'item description')), None)
+
+            cost_col = next((c for c in cols if 'net' in c and 'cost' in c), None)
             if not cost_col:
-                # Prefer 'cost rate' (actual purchase cost) over 'rate' (sale rate)
                 cost_col = next((c for c in cols if c == 'cost rate'), None)
-                if not cost_col:
-                    cost_col = next((c for c in cols if 'cost' in c and 'rate' in c), None)
-            if not supp_col:
-                supp_col = next((c for c in cols if c == 'supplier'), None)
+            if not cost_col:
+                cost_col = next((c for c in cols if 'cost' in c and 'rate' in c), None)
+
+            supp_col = next((c for c in cols if 'supplier' in c or c == 'supplier'), None)
+            date_col = next((c for c in cols if c in ('date', 'invoice date', 'purchase date',
+                                                       'order date', 'inv date')), None)
+            qty_col  = next((c for c in cols if c in ('sq.m', 'sqm', 'qty', 'quantity',
+                                                       'sq. m', 'square meter')), None)
 
             if not item_col or not cost_col:
                 return 0, f"Missing columns (need Product No.+Cost Rate or item code+net cost). Found: {cols}"
 
+            # ── Clean ─────────────────────────────────────────────
             df_s[cost_col] = pd.to_numeric(df_s[cost_col], errors='coerce')
             df_s = df_s[df_s[cost_col].notna() & (df_s[cost_col] > 0)].copy()
             df_s[item_col] = df_s[item_col].astype(str).apply(
-                lambda x: re.sub(r' +', ' ', x.replace(' ', ' ')).strip().upper())
+                lambda x: re.sub(r' +', ' ', x.replace('\xa0', ' ')).strip().upper())
             df_s = df_s[df_s[item_col].str.len() > 2]
+            if name_col:
+                df_s[name_col] = df_s[name_col].astype(str).apply(
+                    lambda x: re.sub(r' +', ' ', x.replace('\xa0', ' ')).strip().upper())
+            if date_col:
+                df_s[date_col] = pd.to_datetime(df_s[date_col], errors='coerce')
+                df_s = df_s.sort_values(date_col, ascending=True, na_position='last')
+            if qty_col:
+                df_s[qty_col] = pd.to_numeric(df_s[qty_col], errors='coerce').fillna(0)
 
-            # Use last row per product = most recent purchase cost
-            # (sheet rows are purchase history; last entry = latest price)
+            # ── FIFO batch building ───────────────────────────────
             loaded = 0
             for _, row in df_s.iterrows():
-                pno  = row[item_col]
+                code = row[item_col]
+                # Full key: combine code + name if name is a separate column with extra info
+                if name_col:
+                    name_part = row.get(name_col, '')
+                    full_key = f"{code} {name_part}".strip() if name_part and name_part not in code else code
+                else:
+                    # Product No. already contains full name e.g. "MSM1282 MONTAGE SILKY MATT TONE H2"
+                    full_key = code
+
                 cost = float(row[cost_col])
+                qty  = max(float(row[qty_col]), 0.01) if qty_col else 1.0
                 supp = str(row[supp_col]).strip() if supp_col else source_label
-                # Always overwrite — last row for this product wins (most recent)
-                supplier_wac[pno] = {'sqm': 1, 'val': cost,
-                                     'last_cost': cost,
-                                     'supplier': supp or source_label}
-                supplier_match[pno] = 'exact'
+
+                if full_key not in supplier_wac:
+                    supplier_wac[full_key] = {'batches': [], 'supplier': supp or source_label}
+                # Append batch in arrival order (oldest first after date sort)
+                supplier_wac[full_key]['batches'].append((qty, cost))
+                supplier_wac[full_key]['supplier'] = supp or source_label
+                supplier_match[full_key] = 'exact'
                 loaded += 1
             return loaded, None
 
@@ -471,27 +500,21 @@ def load_data(path):
     except Exception as _sup_ex:
         st.session_state['supplier_log'] = [('ERROR', '—', 0, str(_sup_ex)[:300])]
 
-    # ── Build final cost map ──────────────────────────────────
+    # ── Build final FIFO cost map ─────────────────────────────
+    # FIFO cost = cost of the OLDEST purchase batch for each product
     supplier_wac_map = {}
     supplier_source_map = {}
     for pno, v in supplier_wac.items():
-        if v['sqm'] > 0:
-            supplier_wac_map[pno]    = round(v['val'] / v['sqm'], 2)
+        batches = v.get('batches', [])
+        if batches:
+            # FIFO: oldest batch (index 0) is the cost we'd use first
+            fifo_cost = batches[0][1]   # (qty, cost)[1]
+            supplier_wac_map[pno]    = round(fifo_cost, 2)
             supplier_source_map[pno] = supplier_match.get(pno, 'exact')
 
     if supplier_wac_map:
         st.session_state['supplier_wac_map']    = supplier_wac_map
         st.session_state['supplier_source_map'] = supplier_source_map
-
-    # Build supplier WAC map
-    supplier_wac_map = {
-        pno: v['val']/v['sqm']
-        for pno, v in supplier_wac.items() if v['sqm'] > 0
-    }
-
-    # Store in session for the Supplier Costs page
-    if supplier_wac_map:
-        st.session_state['supplier_wac_map'] = supplier_wac_map
 
     def ap(row):
         pno = str(row.get('Product No.','')).upper()
@@ -883,6 +906,13 @@ with st.spinner("Loading Mi-Tiles data..."):
     pairs_df, size_pairs_df = build_pairs(df, prod)
 
 # ── Force supplier costs to reload if not yet in session ──
+# Version bump forces reload when cost logic changes
+_SUPPLIER_LOGIC_VER = 4
+if st.session_state.get('_supplier_logic_ver') != _SUPPLIER_LOGIC_VER:
+    for _k in ['supplier_wac_map','supplier_source_map','supplier_log']:
+        st.session_state.pop(_k, None)
+    st.session_state['_supplier_logic_ver'] = _SUPPLIER_LOGIC_VER
+
 if 'supplier_wac_map' not in st.session_state:
     try:
         import requests
@@ -921,34 +951,68 @@ if 'supplier_wac_map' not in st.session_state:
             return df_s, None
 
         def _register(df_s, label):
-            cols = list(df_s.columns)
+            """FIFO costing per full product name (standalone loader).
+            Same logic as _register_costs — see that function for details.
+            """
+            cols = [str(c).strip().lower() for c in df_s.columns]
+            df_s.columns = cols
+
             item_col = next((c for c in cols if 'item' in c and 'code' in c), None)
-            cost_col = next((c for c in cols if 'net' in c and 'cost' in c), None)
-            supp_col = next((c for c in cols if 'supplier' in c), None)
             if not item_col:
                 item_col = next((c for c in cols if c in ('product no.','product no','product_no')), None)
+
+            name_col = next((c for c in cols if ('item' in c and 'name' in c)
+                             or ('product' in c and 'name' in c)
+                             or c in ('description', 'item desc', 'item description')), None)
+
+            cost_col = next((c for c in cols if 'net' in c and 'cost' in c), None)
             if not cost_col:
                 cost_col = next((c for c in cols if c == 'cost rate'), None)
-                if not cost_col:
-                    cost_col = next((c for c in cols if 'cost' in c and 'rate' in c), None)
-            if not supp_col:
-                supp_col = next((c for c in cols if c == 'supplier'), None)
+            if not cost_col:
+                cost_col = next((c for c in cols if 'cost' in c and 'rate' in c), None)
+
+            supp_col = next((c for c in cols if 'supplier' in c or c == 'supplier'), None)
+            date_col = next((c for c in cols if c in ('date', 'invoice date', 'purchase date',
+                                                       'order date', 'inv date')), None)
+            qty_col  = next((c for c in cols if c in ('sq.m', 'sqm', 'qty', 'quantity',
+                                                       'sq. m', 'square meter')), None)
+
             if not item_col or not cost_col:
                 return 0, f"Columns not found. Got: {cols}"
+
             df_s[cost_col] = pd.to_numeric(df_s[cost_col], errors='coerce')
             df_s = df_s[df_s[cost_col].notna() & (df_s[cost_col] > 0)].copy()
-            df_s[item_col] = df_s[item_col].astype(str).str.strip().str.upper()
+            df_s[item_col] = df_s[item_col].astype(str).apply(
+                lambda x: re.sub(r' +', ' ', x.replace('\xa0', ' ')).strip().upper())
             df_s = df_s[df_s[item_col].str.len() > 2]
-            # Use last row per product = most recent purchase cost
-            # (sheet rows are purchase history; last entry = latest price)
+            if name_col:
+                df_s[name_col] = df_s[name_col].astype(str).apply(
+                    lambda x: re.sub(r' +', ' ', x.replace('\xa0', ' ')).strip().upper())
+            if date_col:
+                df_s[date_col] = pd.to_datetime(df_s[date_col], errors='coerce')
+                df_s = df_s.sort_values(date_col, ascending=True, na_position='last')
+            if qty_col:
+                df_s[qty_col] = pd.to_numeric(df_s[qty_col], errors='coerce').fillna(0)
+
             n = 0
             for _, row in df_s.iterrows():
-                pno  = row[item_col]; cost = float(row[cost_col])
+                code = row[item_col]
+                if name_col:
+                    name_part = row.get(name_col, '')
+                    full_key = f"{code} {name_part}".strip() if name_part and name_part not in code else code
+                else:
+                    full_key = code
+
+                cost = float(row[cost_col])
+                qty  = max(float(row[qty_col]), 0.01) if qty_col else 1.0
                 supp = str(row[supp_col]).strip() if supp_col else label
-                # Always overwrite — last row for this product wins (most recent)
-                _supplier_wac[pno] = {'sqm': 1, 'val': cost,
-                                      'last_cost': cost, 'supplier': supp}
-                _supplier_match[pno] = 'exact'; n += 1
+
+                if full_key not in _supplier_wac:
+                    _supplier_wac[full_key] = {'batches': [], 'supplier': supp}
+                _supplier_wac[full_key]['batches'].append((qty, cost))
+                _supplier_wac[full_key]['supplier'] = supp
+                _supplier_match[full_key] = 'exact'
+                n += 1
             return n, None
 
         _fids = st.secrets.get("SUPPLIER_FILE_IDS", "")
@@ -977,8 +1041,10 @@ if 'supplier_wac_map' not in st.session_state:
         st.session_state['supplier_log'] = _supplier_log
         _wac_map = {}; _src_map = {}
         for _pno, _v in _supplier_wac.items():
-            if _v['sqm'] > 0:
-                _wac_map[_pno] = round(_v['val'] / _v['sqm'], 2)
+            _batches = _v.get('batches', [])
+            if _batches:
+                # FIFO: oldest batch (index 0) is used first
+                _wac_map[_pno] = round(_batches[0][1], 2)
                 _src_map[_pno] = _supplier_match.get(_pno, 'exact')
         if _wac_map:
             st.session_state['supplier_wac_map']    = _wac_map
@@ -4048,6 +4114,18 @@ Your supplier files need a sheet with these columns (same as your ERP export):
     else:
         st.info(f"🔍 Debug: supplier_log is empty. SUPPLIER_FILE_IDS secret = `{st.secrets.get('SUPPLIER_FILE_IDS', 'NOT FOUND')}`")
 
+    # ── Quick product cost lookup ─────────────────────────────
+    with st.expander("🔎 Check cost for a specific product", expanded=False):
+        _lookup = st.text_input("Enter Product No. (e.g. MSM1288)", key="sc_lookup").strip().upper()
+        if _lookup:
+            if _lookup in supplier_map:
+                st.success(f"✅ **{_lookup}** → Cost: **Rs {supplier_map[_lookup]:,.2f}** | Match: {source_map.get(_lookup, '—')}")
+            else:
+                st.warning(f"❌ **{_lookup}** not found in supplier cost map. It will use WAC estimate.")
+                # Show a few close matches
+                _close = [k for k in supplier_map if k.startswith(_lookup[:4])][:5]
+                if _close: st.caption(f"Similar keys: {', '.join(_close)}")
+
     if not supplier_map:
         st.warning("No supplier cost data loaded.")
         st.info("""**To enable real profit calculation:**
@@ -5414,12 +5492,18 @@ elif page == "📋 Sales & Profit Report":
 
     # ── Grouped tables ─────────────────────────────────────────
     def _build_group(grp_col, data_s, data_r):
-        _g = data_s.groupby(grp_col).agg(
-            Sale_Val=('SALE','sum'), Sale_Sqm=('Sq.m','sum'),
-            ERP_P=('Profit','sum'), Act_P=('Actual Profit','sum') if 'Actual Profit' in data_s.columns else ('Profit','sum'),
-            Bills=('Bill No.','nunique'), Txns=('Bill No.','count')
-        ).reset_index()
-        _r = data_r.groupby(grp_col).agg(Ret_Val=('RETURN','sum'), Ret_Sqm=('Sq.m','sum')).reset_index()
+        _has_act = 'Actual Profit' in data_s.columns
+        _agg_dict = {
+            'Sale_Val': ('SALE','sum'), 'Sale_Sqm': ('Sq.m','sum'),
+            'ERP_P': ('Profit','sum'),
+            'Bills': ('Bill No.','nunique'),
+        }
+        if _has_act:
+            _agg_dict['Act_P'] = ('Actual Profit','sum')
+        _g = data_s.groupby(grp_col).agg(**_agg_dict).reset_index()
+        if not _has_act:
+            _g['Act_P'] = 0.0
+        _r = data_r.groupby(grp_col).agg(Ret_Val=('RETURN','sum'), Ret_Sqm=('Sq.m','sum')).reset_index() if len(data_r) > 0 else pd.DataFrame(columns=[grp_col,'Ret_Val','Ret_Sqm'])
         _g = _g.merge(_r, on=grp_col, how='left').fillna(0)
         _g['Net Value']  = _g['Sale_Val'] - _g['Ret_Val']
         _g['Net Sqm']    = _g['Sale_Sqm'] - _g['Ret_Sqm']
@@ -5449,7 +5533,13 @@ elif page == "📋 Sales & Profit Report":
         if is_admin:
             _tot['Act Profit'] = fmt_m(_g['Act_P'].sum())
             _tot['Act M%']     = round(_g['Act_P'].sum() / _sv * 100, 1) if _sv > 0 else 0
-        _out = _g[_cols].sort_values('Sale_Val', ascending=False) if grp_col != 'Month' else _g[_cols].sort_values(grp_col)
+        # Sort by raw Sale_Val (not the formatted string column)
+        _g_disp = _g[_cols + ['Sale_Val']].copy()
+        if grp_col == 'Month':
+            _g_disp = _g_disp.sort_values(grp_col)
+        else:
+            _g_disp = _g_disp.sort_values('Sale_Val', ascending=False)
+        _out = _g_disp[_cols]  # drop Sale_Val after sorting
         return pd.concat([_out, pd.DataFrame([_tot])], ignore_index=True), _g
 
     if _view == "Transaction Lines":
