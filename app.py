@@ -1222,6 +1222,9 @@ def pi_filters(pi_df, key_prefix):
 # ─────────────────────────────────────────────
 if page == "📊 Overview":
     st.title("📊 Inventory Overview")
+    with st.expander("ℹ️ About this report", expanded=False):
+        st.markdown("**What it shows:** A bird's-eye view of everything currently on the warehouse floor.\n\n**Key metrics explained:**\n- **Total Stock Value** — What you paid (WAC cost) for all unsold stock. e.g. Rs 45M means Rs 45M is sitting in the warehouse.\n- **Inventory Status buckets** — Fast Mover, Slow Mover, Dead Stock, Tail Stock, Ghost Performer. Each product is automatically classified based on its velocity and sell-through.\n- **Demand Pattern** — Regular (consistent buyers), Seasonal (spikes at certain months), Lumpy (occasional bulk orders), Low (rarely moves).\n- **Stock Health Score** — Weighted score of how well the portfolio is rotating. 80+ is healthy; below 50 means too much capital is stuck in slow/dead product.")
+
     with st.expander("🔍 Filters", expanded=False):
         dff = global_filters(df, "ov")
     sales_df = dff[dff['Type']=='S'].copy()
@@ -1328,6 +1331,9 @@ High ML Risk Products: {(pi['Risk Label']=='🔴 High').sum() if 'Risk Label' in
 
 elif page == "📈 Sales Trends":
     st.title("📈 Sales Trends")
+    with st.expander("ℹ️ About this report", expanded=False):
+        st.markdown("**What it shows:** How revenue and quantity sold have moved over time — by month, by product, by category, and by brand.\n\n**Key metrics explained:**\n- **Monthly Revenue** — Total sale value invoiced in that calendar month. A dip in Aug vs Jul means invoicing slowed, not necessarily demand.\n- **Sq.m Sold** — Physical area moved. Useful when average selling price changes — revenue can go up while volume goes down.\n- **YoY Growth** — Compares this month's revenue to the same month last year. e.g. +22% means this October beat last October by 22%.\n- **By Category / Brand** — Shows which tile type (Floor, Wall, Outdoor) or supplier brand is driving growth or dragging the overall number.")
+
     with st.expander("🔍 Filters", expanded=True):
         dff = global_filters(df, "st")
         # Stock Health / Inventory Status / Demand Pattern filters (from pi)
@@ -1444,6 +1450,9 @@ elif page == "📈 Sales Trends":
 
 elif page == "🔴 Dead Stock":
     st.title("🔴 Dead Stock Analysis")
+    with st.expander("ℹ️ About this report", expanded=False):
+        st.markdown('**What it shows:** Products that have not sold in a long time AND have low sell-through — meaning demand likely dried up, not just a display decision.\n\n**Key metrics explained:**\n- **Dead Stock Value** — Total WAC cost of all dead products. e.g. Rs 8M dead = Rs 8M of your cash is locked with near-zero chance of full recovery.\n- **Days Since Last Sale** — How long it has been since the last invoice for this product. 365+ days = very low demand probability.\n- **Sell Through %** — What % of total purchases has been sold. 20% sell-through means 80% is still unsold.\n- **ML Early Warning** — Products NOT yet dead but with ≥70% probability of becoming dead within the next few months, based on slowing velocity and accumulating stock.')
+
     with st.expander("🔍 Filters", expanded=True):
         flt = pi_filters(pi, "ds")
     dead = flt[(flt['Inventory Status']=='Dead Stock')&(flt['Current Stock Sqm']>0)].copy().sort_values('Stock Value PKR',ascending=False)
@@ -1492,6 +1501,9 @@ Products dead 1-2 years: {((dead['Days Since Last Sale']>365)&(dead['Days Since 
 
 elif page == "✅ Fast Movers":
     st.title("✅ Fast Movers")
+    with st.expander("ℹ️ About this report", expanded=False):
+        st.markdown('**What it shows:** Your top-selling products by velocity — products that sell consistently and quickly.\n\n**Key metrics explained:**\n- **Sales Velocity (sqm/month)** — How many sqm this product sells on average per month. e.g. 450 sqm/month means it sells roughly 15 sqm every day.\n- **Days of Stock Left** — At current velocity, how many days until stockout. e.g. 12 days means you have 12 days before this product hits zero.\n- **Reorder Flag** — Products where Days of Stock < Reorder Lead Time. These need a PO raised immediately.\n- **Revenue Contribution** — What % of total sales comes from this product. Top 20 products often drive 80% of revenue.')
+
     with st.expander("🔍 Filters", expanded=True):
         _fm_min = df['Date'].min().date(); _fm_max = df['Date'].max().date()
         _fm_dr = st.date_input("📅 Date Range", value=(_fm_min, _fm_max), min_value=_fm_min, max_value=_fm_max, key="fm_date")
@@ -1514,6 +1526,9 @@ elif page == "✅ Fast Movers":
 
 elif page == "📦 Product Intelligence":
     st.title("📦 Product Intelligence")
+    with st.expander("ℹ️ About this report", expanded=False):
+        st.markdown('**What it shows:** A deep profile for every product — cost, revenue, stock levels, velocity, and supplier info — all in one view.\n\n**Key metrics explained:**\n- **WAC Rate** — Weighted Average Cost per sqm you paid to buy this product. e.g. WAC 850 means you paid Rs 850/sqm on average across all purchase batches.\n- **Current Stock Sqm** — Physical area sitting in the warehouse right now.\n- **Stock Value PKR** — Current Stock × WAC Rate. What it cost you to hold this quantity.\n- **Product Families** — Variants of the same base code (e.g. MSM1282 in 60x60, 60x120, polished, matt) grouped together so you compare sizes.')
+
     with st.expander("🔍 Filters", expanded=True):
         _pi_min = df['Date'].min().date(); _pi_max = df['Date'].max().date()
         _pi_dr = st.date_input("📅 Date Range", value=(_pi_min, _pi_max), min_value=_pi_min, max_value=_pi_max, key="pi_date")
@@ -1574,6 +1589,9 @@ elif page == "📦 Product Intelligence":
 
 elif page == "🏭 Brand & Company":
     st.title("🏭 Brand & Company Analysis")
+    with st.expander("ℹ️ About this report", expanded=False):
+        st.markdown("**What it shows:** Performance aggregated by supplier / brand — which companies you stock are making you money vs tying up capital.\n\n**Key metrics explained:**\n- **Revenue by Brand** — Total invoiced sales for products from each supplier brand. e.g. Montage = Rs 12M means Montage products generated Rs 12M in sales.\n- **Stock Value by Brand** — How much capital is allocated to each brand. A brand with Rs 15M stock but Rs 3M revenue is over-invested.\n- **Margin by Brand** — Average gross margin % across all products from that brand. Higher = better deal from supplier or better selling price achieved.\n- **Stock Turn** — How many times per year this brand's stock fully cycles. Turn of 4 = every 3 months you sell and rebuy.")
+
     with st.expander("🔍 Filters", expanded=False):
         dff = global_filters(df, "bc", show_salesman=False)
     sales_df = dff[dff['Type']=='S'].copy()
@@ -1594,6 +1612,9 @@ elif page == "🏭 Brand & Company":
 
 elif page == "👤 Customer Intelligence":
     st.title("👤 Customer Intelligence")
+    with st.expander("ℹ️ About this report", expanded=False):
+        st.markdown("**What it shows:** Who your customers are, how much they buy, how loyal they are, and who is at risk of not coming back.\n\n**Key metrics explained:**\n- **Churn Risk Score** — Based on each customer's own buying rhythm. If Ali Builder buys every 45 days but hasn't bought in 120 days, churn risk is high. Not compared to all customers — compared to that customer's own pattern.\n- **Recency / Frequency / Monetary (RFM)** — Three axes that together define customer value. A customer who bought yesterday, buys often, and spends a lot = VIP.\n- **Winback Priority** — High-revenue customers showing churn signals. e.g. Rs 2.4M lifetime customer who hasn't bought in 90 days = call today.\n- **New Customers** — Accounts with their first invoice in the selected date range. Growth in new customers = expanding market reach.")
+
     with st.expander("🔍 Filters", expanded=True):
         dff = global_filters(df, "ci", show_salesman=True)
     sales_all = df[df['Type']=='S'].copy()
@@ -1705,6 +1726,9 @@ Top 5 customers: {top.head(5)[['Account Name','Revenue','Bills','Days Since']].t
 elif page == "💰 Margin Analysis":
     if st.session_state['role'] not in ['admin','manager']: st.error("Access denied."); st.stop()
     st.title("💰 Margin Analysis")
+    with st.expander("ℹ️ About this report", expanded=False):
+        st.markdown('**What it shows:** The gap between what you sell for and what you paid — your real profitability per product, category, and brand.\n\n**Key metrics explained:**\n- **Gross Margin %** — (Sale Price − Cost) ÷ Sale Price × 100. e.g. 28% margin on a Rs 1,200/sqm product means Rs 336 gross profit per sqm.\n- **Margin Rs** — Absolute profit in rupees. A product with 40% margin but low volume may contribute less Rs than a 20% margin fast mover.\n- **ERP Margin vs Actual Margin** — ERP uses its own cost assumption; this dashboard uses your real supplier WAC. Difference shows how inaccurate ERP reporting was.\n- **Margin by Salesman** — Whether discount-heavy salesmen are eroding margin. Salesman A averaging 18% vs Salesman B at 31% on the same products is a problem.')
+
     with st.expander("🔍 Filters", expanded=True):
         dff = global_filters(df, "ma")
     sales_df = dff[dff['Type']=='S'].copy()
@@ -1736,6 +1760,9 @@ elif page == "💰 Margin Analysis":
 elif page == "🧑‍💼 Salesman Performance":
     if st.session_state['role'] not in ['admin','manager']: st.error("Access denied."); st.stop()
     st.title("🧑‍💼 Salesman Performance")
+    with st.expander("ℹ️ About this report", expanded=False):
+        st.markdown("**What it shows:** How much each salesman sold, how their performance trended month by month, and how they rank against each other.\n\n**Key metrics explained:**\n- **Revenue** — Total sale value invoiced by this salesman in the period. e.g. Usman = Rs 4.2M means his accounts generated Rs 4.2M.\n- **Sq.m Sold** — Volume moved regardless of price mix. Useful to separate revenue growth (higher price) from volume growth (more tiles).\n- **Monthly Trend** — Is the salesman improving, plateauing, or declining? A downward trend for 3 consecutive months is a coaching flag.\n- **Returns %** — Returns attributed to this salesman's bills. High returns may indicate quality issues or incorrect product being sold.")
+
     with st.expander("🔍 Filters", expanded=False):
         dff = global_filters(df, "sp")
     sales_df = dff[dff['Type']=='S'].copy(); returns_df = dff[dff['Type']=='S.R'].copy()
@@ -1777,6 +1804,9 @@ Salesman details: {sal[['Salesman','Revenue','ERP M%','Bills','Customers']].to_s
 elif page == "🎯 Incentive Calculator":
     if not is_admin: st.error("Admin only."); st.stop()
     st.title("🎯 Salesman Incentive Calculator")
+    with st.expander("ℹ️ About this report", expanded=False):
+        st.markdown('**What it shows:** Calculates incentive payout for each salesman based on revenue targets and achievement slabs.\n\n**Key metrics explained:**\n- **Target** — Monthly revenue goal set for each salesman. e.g. Rs 2.5M target.\n- **Achievement %** — Actual ÷ Target × 100. 110% means they exceeded target by 10%.\n- **Slab** — Different payout rates at different achievement levels. e.g. 80-99% = 1%, 100-109% = 1.5%, 110%+ = 2% of revenue as bonus.\n- **Incentive Earned** — Calculated payout. Helps run payroll without manual Excel sheets.')
+
     SALESMAN_CONFIG = {
         'FIDA':    {'salary':125000,'tier':'Senior','base_target':20000000,'commission':0.005,'bonus_target':30000000,'bonus':50000,'return_threshold':5.0,'return_penalty':0.001},
         'SAQIB':   {'salary':125000,'tier':'Senior','base_target':20000000,'commission':0.005,'bonus_target':30000000,'bonus':50000,'return_threshold':5.0,'return_penalty':0.001},
@@ -1838,6 +1868,9 @@ elif page == "🎯 Incentive Calculator":
 elif page == "🏹 Dead Stock Targets":
     if not is_admin: st.error("Admin only."); st.stop()
     st.title("🏹 Dead Stock Salesman Targets")
+    with st.expander("ℹ️ About this report", expanded=False):
+        st.markdown('**What it shows:** Assigns dead stock clearance targets to salesmen — turning a liability into a sales push.\n\n**Key metrics explained:**\n- **Dead Stock Assigned** — Which products each salesman is responsible for clearing from the warehouse.\n- **Clearance Target (sqm)** — How much of a dead product each salesman should sell this month.\n- **Priority** — Based on how long the product has been dead and how much value it represents. Oldest + highest value = clear first.\n- **Discount Authority** — How much discount a salesman can offer to move dead stock without approval.')
+
     with st.expander("🔍 Filters", expanded=True):
         flt = pi_filters(pi, "dst")
     dead=flt[(flt['Inventory Status']=='Dead Stock')&(flt['Current Stock Sqm']>0)].copy()
@@ -1863,6 +1896,9 @@ elif page == "🏹 Dead Stock Targets":
 
 elif page == "🛒 Product Pairs":
     st.title("🛒 Frequently Bought Together")
+    with st.expander("ℹ️ About this report", expanded=False):
+        st.markdown('**What it shows:** Which products, sizes, or categories are commonly purchased in the same invoice — enabling cross-sell and bundle pricing.\n\n**Key metrics explained:**\n- **Support** — How often both products appear together out of all bills. e.g. 12% support means 12 out of every 100 bills contain both products.\n- **Confidence** — When a customer buys Product A, how often do they also buy Product B? e.g. 67% confidence means 2 in 3 buyers of A also bought B.\n- **Lift** — Is the pair bought together more than by chance? Lift > 1 = yes. Lift 2.4 means customers are 2.4x more likely to buy both together than independently.\n- **Size Pairs** — Which tile sizes (60x60 with 30x60 border, for example) are commonly combined — useful for display design.')
+
     tab1,tab2=st.tabs(["📦 Product SKU Pairs","📐 Size Pairs"])
     with tab1:
         st.subheader("Product SKU Pairs")
@@ -1891,6 +1927,9 @@ elif page == "🛒 Product Pairs":
 
 elif page == "📊 ABC-XYZ Analysis":
     st.title("📊 ABC-XYZ Inventory Classification")
+    with st.expander("ℹ️ About this report", expanded=False):
+        st.markdown('**What it shows:** Every product classified on two axes — ABC (by revenue contribution) and XYZ (by demand predictability).\n\n**Key metrics explained:**\n- **A / B / C** — A = top 70% of revenue (your critical products). B = next 20%. C = bottom 10%. Focus inventory management effort on A items.\n- **X / Y / Z** — X = predictable, steady demand (easy to plan). Y = variable demand (seasonal or fluctuating). Z = highly irregular (lumpy, hard to forecast).\n- **AX** — Best category: high revenue + predictable. These should never stock out.\n- **CZ** — Worst category: low revenue + unpredictable. Candidates for discontinuation.\n- **Implication:** An AZ product (high revenue, irregular demand) needs safety stock. A CX product (low revenue, predictable) can be ordered just-in-time.')
+
     with st.expander("🔍 Filters", expanded=True):
         flt=pi_filters(pi,"axyz")
     st.subheader("Classification Matrix")
@@ -1916,6 +1955,9 @@ elif page == "📊 ABC-XYZ Analysis":
 
 elif page == "📉 Sell Through":
     st.title("📉 Sell Through Rate Analysis")
+    with st.expander("ℹ️ About this report", expanded=False):
+        st.markdown('**What it shows:** For every product, how much of what you bought has actually been sold — revealing how well purchasing decisions translated into sales.\n\n**Key metrics explained:**\n- **Sell Through %** — (Quantity Sold ÷ Quantity Purchased) × 100. e.g. 85% means 85% of all stock ever bought is now sold.\n- **Low Sell Through** — Below 40% is a warning: more than half of what was purchased is still unsold (or was written off).\n- **High Sell Through** — 95%+ with active stock means product is nearly exhausted and may need reorder.\n- **By Brand** — Shows which brands have chronic leftover stock vs which brands you buy and sell cleanly.')
+
     with st.expander("🔍 Filters", expanded=True):
         flt=pi_filters(pi,"str")
     c1,c2,c3,c4=st.columns(4)
@@ -1938,6 +1980,9 @@ elif page == "📉 Sell Through":
 
 elif page == "🔮 Demand Forecast":
     st.title("🔮 Demand Forecast (30/60/90 Days)")
+    with st.expander("ℹ️ About this report", expanded=False):
+        st.markdown("**What it shows:** AI-generated predictions of how much of each fast-moving product you will sell in the next 30, 60, and 90 days.\n\n**Key metrics explained:**\n- **Forecast Sqm** — Predicted quantity to be sold. e.g. 30-day forecast of 320 sqm means the model expects you to sell 320 sqm in the next month.\n- **Confidence Interval** — Upper and lower bounds. e.g. 280–360 sqm. The actual result should fall in this range 80% of the time.\n- **Model: Prophet** — Facebook's time-series model trained on your own invoice history. Accounts for seasonality (Eid, summer construction season).\n- **Requires 18+ months of data** per product for reliable results. Products with sparse history show a warning instead of a forecast.")
+
     st.info("📊 **Forecast method: Sales Velocity** — Average monthly sales extrapolated forward. "
             "Prophet ML forecasting will be enabled in ~8 months once 2+ full years of data exist per product. "
             "Current data (14–26 months per SKU) is insufficient for reliable seasonal ML forecasting.")
@@ -2018,6 +2063,9 @@ elif page == "🔮 Demand Forecast":
 
 elif page == "⚠️ Reorder Alerts":
     st.title("⚠️ Reorder Alerts")
+    with st.expander("ℹ️ About this report", expanded=False):
+        st.markdown('**What it shows:** Products that need a purchase order raised now — either because stock is critically low or because lead time means you will stockout before the next delivery arrives.\n\n**Key metrics explained:**\n- **Days of Stock Remaining** — At current sell rate, how many days until zero. e.g. 8 days = stockout in 8 days.\n- **Reorder Qty (sqm)** — Suggested quantity to order based on forecasted demand + safety buffer.\n- **Safety Stock** — Minimum floor quantity to hold at all times to cover demand during supplier lead time.\n- **Lead Time (days)** — How many days from PO to delivery for this supplier. A 21-day lead time means a reorder alert should trigger 21 days before stockout.')
+
     with st.expander("🔍 Filters", expanded=True):
         flt=pi_filters(pi,"ra")
     reorder=flt[(flt['Stock Health']=='Reorder Now')&(flt['Current Stock Sqm']>0)&(flt['Sales Velocity/Month']>0)].copy().sort_values('Sales Velocity/Month',ascending=False)
@@ -2043,6 +2091,9 @@ Top 5 by reorder value: {reorder.nlargest(5,'Reorder Value (Rs)')[['Product No.'
 
 elif page == "📦 Stock Comparison":
     st.title("📦 Stock Level Comparison")
+    with st.expander("ℹ️ About this report", expanded=False):
+        st.markdown('**What it shows:** Side-by-side comparison of stock levels across two points in time — to see what moved, what accumulated, and what disappeared.\n\n**Key metrics explained:**\n- **Opening Stock** — Quantity and value at the start of the comparison period.\n- **Closing Stock** — Quantity and value at the end.\n- **Movement** — Closing − Opening (adjusted for purchases). A negative movement means it sold; positive means more was bought than sold.\n- **Value Change** — How much your inventory investment grew or shrank. Rising stock value with flat sales = capital accumulating in warehouse.')
+
     with st.expander("🔍 Period Selection & Filters", expanded=True):
         c1,c2=st.columns(2)
         with c1:
@@ -2111,6 +2162,9 @@ elif page == "📦 Stock Comparison":
 
 elif page == "🔍 Search":
     st.title("🔍 Universal Search")
+    with st.expander("ℹ️ About this report", expanded=False):
+        st.markdown("**What it shows:** A single search box that queries products, customers, and transactions simultaneously — find anything in the system in one step.\n\n**Key metrics explained:**\n- **Product Results** — Matching products by code or name, showing current stock, WAC, and status.\n- **Customer Results** — Matching account names, showing their total revenue and last purchase date.\n- **Transaction Results** — Matching bill numbers or line items — useful when a customer disputes an invoice.\n- **Ledger View** — Every transaction in date order with ERP closing stock column — use this when numbers don't reconcile.")
+
     c1,c2 = st.columns([2,1])
     with c1:
         query=st.text_input("Search — product, customer, brand, category, size, salesman...",
@@ -2192,6 +2246,9 @@ elif page == "🔍 Search":
 
 elif page == "📊 Period Comparison":
     st.title("📊 Period Comparison")
+    with st.expander("ℹ️ About this report", expanded=False):
+        st.markdown("**What it shows:** Any two time periods compared head-to-head across revenue, volume, margin, and product mix — to answer 'did we improve?'\n\n**Key metrics explained:**\n- **Revenue Δ** — Absolute change in sale value. e.g. +Rs 1.2M means Period 2 generated Rs 1.2M more than Period 1.\n- **Sq.m Δ** — Volume change. Revenue up but sqm down = you sold fewer tiles at higher price (mix shift or price increase).\n- **Margin Δ** — Did profitability improve? Revenue can grow while margin shrinks if product mix shifts to lower-margin lines.\n- **New vs Lost Products** — Products that appeared in Period 2 but not Period 1 (new lines), and products in Period 1 missing from Period 2 (discontinued or stalled).")
+
     c1,c2=st.columns(2)
     with c1:
         st.markdown("**📅 Period A**")
@@ -2250,6 +2307,9 @@ elif page == "📊 Period Comparison":
 
 elif page == "📦 Closing Stock":
     st.title("📦 Closing Stock Report")
+    with st.expander("ℹ️ About this report", expanded=False):
+        st.markdown("**What it shows:** A snapshot of every product's stock quantity and value at any date you select — your balance sheet inventory line.\n\n**Key metrics explained:**\n- **Closing Qty (sqm)** — How many sqm of each product was physically in stock at the selected date.\n- **WAC Rate** — The cost per sqm used to value this stock (Weighted Average Cost across all purchase batches).\n- **Closing Value** — Qty × WAC Rate. This is the inventory figure for your balance sheet or bank statement.\n- **As-of Date** — You can run this for any historical date, not just today. Useful for month-end reporting or answering auditor queries.")
+
     with st.expander("🔍 Filters", expanded=True):
         c1,c2=st.columns(2)
         with c1:
@@ -2308,6 +2368,9 @@ elif page == "📦 Closing Stock":
 elif page == "📋 Income Statement":
     if st.session_state['role'] not in ['admin','manager']: st.error("Access denied."); st.stop()
     st.title("📋 Income Statement")
+    with st.expander("ℹ️ About this report", expanded=False):
+        st.markdown('**What it shows:** Your Profit & Loss — revenue, cost of goods sold, gross profit, operating expenses, and net profit — for any period.\n\n**Key metrics explained:**\n- **Gross Profit** — Revenue minus Cost of Goods Sold (COGS). e.g. Rs 18M revenue − Rs 13M COGS = Rs 5M gross profit.\n- **Gross Margin %** — Gross Profit ÷ Revenue. 27% means 27 paisa of every rupee earned is gross profit before overheads.\n- **Operating Expenses** — Salaries, rent, utilities, marketing etc. deducted below gross profit.\n- **Net Profit** — What remains after all expenses. This is the number that matters for business health.')
+
     with st.expander("📅 Select Period", expanded=True):
         c1,c2=st.columns(2)
         with c1: is_s=st.date_input("From",value=df['Date'].min().date(),key="is_s")
@@ -2354,6 +2417,9 @@ elif page == "📋 Income Statement":
 elif page == "🏦 Assets Position":
     if not is_admin: st.error("Admin only."); st.stop()
     st.title("🏦 Assets & Liabilities Position")
+    with st.expander("ℹ️ About this report", expanded=False):
+        st.markdown('**What it shows:** A balance sheet snapshot — what Mi-Tiles owns (assets) vs what it owes (liabilities) at the selected date.\n\n**Key metrics explained:**\n- **Current Assets** — Cash, receivables, inventory. e.g. Inventory value Rs 45M + Debtors Rs 12M.\n- **Fixed Assets** — Furniture, display fixtures, computers — long-term items not for resale.\n- **Liabilities** — Amounts owed to suppliers (creditors), loans, outstanding bills.\n- **Net Worth / Equity** — Assets − Liabilities. If positive, the business has more than it owes.')
+
     inv_value=pi[pi['Current Stock Sqm']>0]['Stock Value PKR'].sum()
     st.info(f"📦 Inventory Value (auto from stock data): **{fmt_m(inv_value)}**")
     st.subheader("Current Assets")
@@ -2390,6 +2456,9 @@ elif page == "🏦 Assets Position":
 elif page == "📊 Salesman Rate Analysis":
     if st.session_state['role'] not in ['admin','manager']: st.error("Access denied."); st.stop()
     st.title("📊 Salesman Rate Analysis")
+    with st.expander("ℹ️ About this report", expanded=False):
+        st.markdown("**What it shows:** The actual selling rate (Rs/sqm) each salesman achieves per product — revealing who discounts too aggressively and who commands premium pricing.\n\n**Key metrics explained:**\n- **Avg Rate/Sqm** — Average price this salesman achieved for a product across all bills. e.g. Salesman A sells MSM1282 at Rs 1,050/sqm; Salesman B at Rs 920/sqm — same product, Rs 130 difference.\n- **Rate vs Market** — Compares each salesman's rate to the overall average. Negative delta = selling below average price (discounting).\n- **Rate Leaders** — Who consistently achieves the highest rate per product. Their pitch and negotiation approach is worth studying.\n- **Rate Laggards** — Who consistently sells below average. Either they discount to close deals or are assigned price-sensitive accounts.")
+
     st.caption("Compare which salesman sells each product at highest/lowest rate")
     with st.expander("🔍 Filters", expanded=True):
         dff=global_filters(df,"sra")
@@ -2462,6 +2531,9 @@ elif page == "📊 Salesman Rate Analysis":
 elif page == "🤖 ML Model Health":
     if not is_admin: st.error("Admin only."); st.stop()
     st.title("🤖 ML Model Health & Accuracy Report")
+    with st.expander("ℹ️ About this report", expanded=False):
+        st.markdown("**What it shows:** How accurate the AI/ML models powering the dashboard's forecasts, churn scores, and dead stock predictions actually are.\n\n**Key metrics explained:**\n- **MAE (Mean Absolute Error)** — Average prediction error in original units. e.g. Forecast MAE of 45 sqm means predictions are off by ±45 sqm on average.\n- **MAPE (Mean Absolute % Error)** — Error as a %. 12% MAPE means forecasts are wrong by 12% on average — acceptable for tile inventory.\n- **Churn Model AUC** — Area Under Curve for the churn classifier. 0.85+ is good; below 0.65 means it is barely better than guessing.\n- **Feature Importance** — Which inputs most influence each prediction. For churn, 'days since last purchase' usually dominates.")
+
     st.caption("Live validation metrics — recalculated on every data refresh")
 
     st.info("""
@@ -2629,6 +2701,9 @@ elif page == "🤖 ML Model Health":
 
 elif page == "🎨 Design Brief Tool":
     st.title("🎨 Design Brief Tool")
+    with st.expander("ℹ️ About this report", expanded=False):
+        st.markdown("**What it shows:** A generative AI tool that converts a client's vague description into a structured tile design brief and product shortlist.\n\n**How to use it:**\n- Enter the client's space description (e.g. 'modern 1,200 sqft drawing room, white walls, minimal furniture').\n- The AI generates a design direction (colour palette, texture, layout recommendation) and pulls matching products from your inventory.\n- **Application area estimate** — How many sqm of each product to order based on room dimensions, tile size, and 10% wastage buffer.\n- **Output** — A brief you can share with the client or use as a quote reference.")
+
     st.caption("Upload tile images → Claude Vision analyses each one → Get new design briefs for your supplier")
 
     # ── Step 1: Context from your sales data ─────────────────
@@ -2980,6 +3055,9 @@ Be specific and practical. These briefs will be sent directly to a Chinese tile 
 
 elif page == "📚 Document Chat (RAG)":
     st.title("📚 Document Chat")
+    with st.expander("ℹ️ About this report", expanded=False):
+        st.markdown("**What it shows:** A conversational interface to ask questions about any document (PDF, spec sheet, catalogue) you upload — the AI reads it and answers in plain language.\n\n**How to use it:**\n- Upload a supplier catalogue, product spec sheet, or any PDF.\n- Ask questions like 'What is the water absorption rate of MSM1282?' or 'Which products in this catalogue are Grade A?'\n- **RAG (Retrieval Augmented Generation)** — The AI finds the relevant section of the document before answering, so it does not hallucinate.\n- Useful for quickly extracting specs without reading 50-page catalogues manually.")
+
     st.caption("Upload any document — supplier catalog, FBR notice, price list, SOP — then ask questions in plain English")
 
     # ── How it works ─────────────────────────────────────────
@@ -3559,6 +3637,9 @@ ANSWER:"""
 elif page == "🔍 Product Audit":
     if not is_admin: st.error("Admin only."); st.stop()
     st.title("🔍 Product Audit — Physical vs ERP")
+    with st.expander("ℹ️ About this report", expanded=False):
+        st.markdown('**What it shows:** Compares what your ERP system shows as stock vs what a physical count found — highlighting discrepancies that represent missing inventory or data errors.\n\n**Key metrics explained:**\n- **ERP Qty** — What the system thinks you have based on purchase and sale entries.\n- **Physical Qty** — What was actually counted in the warehouse.\n- **Variance** — Physical − ERP. Negative = more in system than physically exists (possible theft, breakage, or entry error). Positive = more physically than system shows (possible unrecorded purchase).\n- **Variance Value** — Variance × WAC Rate. The financial impact of the discrepancy.')
+
     st.caption("Enter physical counts to reconcile against ERP closing stock. Identifies shrinkage, miscounts, and data entry errors.")
 
     # ── Audit Cycle Guide ────────────────────────────────────
@@ -3769,6 +3850,9 @@ Top 3 variances: {recon_df.reindex(recon_df['Variance Value'].abs().nlargest(3).
 elif page == "💡 Investment Advisor":
     if not is_admin: st.error("Admin only."); st.stop()
     st.title("💡 Investment Advisor")
+    with st.expander("ℹ️ About this report", expanded=False):
+        st.markdown('**What it shows:** Recommendations on which products or brands to invest more in (buy more) and which to reduce exposure to — based on velocity, margin, and sell-through data.\n\n**Key metrics explained:**\n- **Buy More** — Fast movers with high margin and healthy sell-through. Increasing PO quantity here has the highest ROI.\n- **Reduce Exposure** — Slow movers with low sell-through and high stock value. Capital should be reallocated.\n- **Capital Efficiency Score** — Revenue generated per Rs of inventory invested. e.g. Score 3.2 means every Rs 1 of stock generates Rs 3.20 in annual revenue.\n- **Reorder ROI Estimate** — If you invest Rs X in a reorder of Product Y, how much revenue should it generate in 90 days based on current velocity.')
+
     st.caption("Where should Mi-Tiles invest its next procurement budget? AI analysis based on your actual sales, margins, and inventory data.")
 
     st.divider()
@@ -3942,6 +4026,9 @@ Be specific with rupee amounts. Use the actual brand names and product codes fro
 elif page == "📋 Audit Log":
     if not is_admin: st.error("Admin only."); st.stop()
     st.title("📋 Audit Log")
+    with st.expander("ℹ️ About this report", expanded=False):
+        st.markdown("**What it shows:** A chronological record of every significant action taken inside this dashboard — who did what and when.\n\n**Key metrics explained:**\n- **Action Type** — Login, data upload, report export, config change, target set.\n- **User** — Which admin or viewer performed the action.\n- **Timestamp** — Exact date and time (PKT). Useful for disputes ('I didn't change that target!').\n- **Record Count** — For data uploads, how many rows were loaded. A sudden drop (100k → 800 rows) flags a bad upload.")
+
     st.caption("Complete record of all user activity — logins, page visits, AI calls, data refreshes, audit submissions")
 
     tab1, tab2 = st.tabs(["📊 Current Session", "☁️ Full History (Google Sheets)"])
@@ -4089,6 +4176,9 @@ After that, all activity will be logged here automatically.""")
 elif page == "💰 Supplier Costs":
     if not is_admin: st.error("Admin only."); st.stop()
     st.title("💰 Supplier Costs — Real Profit Analysis")
+    with st.expander("ℹ️ About this report", expanded=False):
+        st.markdown("**What it shows:** The actual cost per sqm you paid each supplier, matched to your sales — so every product's real profit is calculated using FIFO/WAC, not ERP assumptions.\n\n**Key metrics explained:**\n- **WAC Cost/Sqm** — Weighted Average Cost across all purchase batches. e.g. Marmi Orvin WAC = Rs 2,039/sqm (not the last invoice price).\n- **FIFO** — For products with multiple purchase dates at different prices, oldest stock cost is used first against sales. This matches physical stock rotation.\n- **Same-date WAC** — If two deliveries of the same product arrived on the same date (e.g. 846 sqm @ Rs 2,083 and 61 sqm @ Rs 1,435), they are treated as one blended delivery at the weighted average cost (≈ Rs 2,039).\n- **Fuzzy Match** — Products in the ERP with slight name variations are matched to supplier invoices. Variants with the same product code (e.g. MSM1282 COMM vs MSM1282 TONE) are kept separate and never merged.")
+
     st.caption("Actual purchase costs from supplier files. When available, these replace the estimated WAC adjustment.")
 
     # ── Setup Instructions ────────────────────────────────────
@@ -4300,6 +4390,8 @@ Your supplier files need a sheet with these columns (same as your ERP export):
 
 elif page == "📖 Formula Guide":
     st.title("📖 Mi-Tiles Dashboard — Formula & Logic Guide")
+    with st.expander("ℹ️ About this report", expanded=False):
+        st.markdown("**What it shows:** The exact formulas, definitions, and business logic behind every metric in the dashboard — your reference manual.\n\n**How to use it:**\n- If a number looks wrong, come here first.\n- Each section covers one metric: formula, data source, edge cases, and a worked example.\n- **No black boxes** — every AI score, velocity calculation, and classification rule is documented with plain-English explanations.")
     st.caption("Every metric, formula, and classification rule used in this dashboard. Reference this whenever a number looks unexpected.")
 
     tab1,tab2,tab3,tab4,tab5 = st.tabs([
@@ -4667,6 +4759,9 @@ C = Bottom 5%
 
 
     st.title("⚔️ Product Showdown")
+    with st.expander("ℹ️ About this report", expanded=False):
+        st.markdown('**What it shows:** A head-to-head comparison of two products across every performance dimension — revenue, velocity, margin, sell-through, and customer overlap.\n\n**Key metrics explained:**\n- **Revenue Comparison** — Which product generated more invoiced sales in the period. A product with lower revenue but higher margin may be more valuable.\n- **Velocity** — Which product sells faster (sqm/month). Faster = less capital tied up per unit of revenue.\n- **Customer Overlap** — How many customers buy both products? High overlap means they are substitutes; low overlap means different buyer profiles.\n- **Margin Δ** — Which product is more profitable per sqm. Use this to decide which one to push harder or display more prominently.')
+
     st.caption("Select any two products and see a head-to-head comparison across every metric. Winner declared per category.")
 
     c1,c2 = st.columns(2)
@@ -4906,6 +5001,9 @@ elif page == "⚔️ Product Showdown":
 elif page == "👻 Ghost Performers":
     if not is_admin: st.error("Admin only."); st.stop()
     st.title("👻 Ghost Performers")
+    with st.expander("ℹ️ About this report", expanded=False):
+        st.markdown('**What it shows:** Products that were fast sellers but are currently out of stock — showing as zero sales, but not because demand dried up.\n\n**Key metrics explained:**\n- **Ghost Score** — True Velocity × Stockout Count ÷ Days Since Last Sale × 100. High score = was selling fast, stocked out multiple times, sold recently. Reorder this first.\n- **True Velocity** — Velocity calculated only during periods when stock was actually available. Removes the distortion of zero-stock periods from the average.\n- **Stockout Count** — How many times this product hit zero inventory. Repeated stockouts mean demand consistently exceeds your purchasing.\n- **Suggested Reorder Sqm** — Recommended quantity to order based on True Velocity × estimated lead time + safety buffer.')
+
     st.caption("Products that sold well but ran out of stock — hidden from normal reports but worth reordering")
 
     with st.expander("📖 What is a Ghost Performer?", expanded=False):
@@ -4938,7 +5036,20 @@ High score = was selling fast + stocked out multiple times + sold recently = def
         st.success("No ghost performers detected — all previously fast products are currently in stock.")
         st.stop()
 
-    # Filters
+    # Filters — row 1: Brand / Category / Size
+    fc1,fc2,fc3 = st.columns(3)
+    with fc1:
+        br_gp  = st.selectbox("Brand",    ['All']+sorted(ghost['Brand Name'].dropna().unique().tolist()), key="gp_br")
+    with fc2:
+        cat_gp = st.selectbox("Category", ['All']+sorted(ghost['Category'].dropna().unique().tolist()),   key="gp_cat")
+    with fc3:
+        sz_gp  = st.selectbox("Size",     ['All']+sorted(ghost['Size'].dropna().unique().tolist()),       key="gp_sz")
+
+    if br_gp  != 'All': ghost = ghost[ghost['Brand Name'] == br_gp]
+    if cat_gp != 'All': ghost = ghost[ghost['Category']   == cat_gp]
+    if sz_gp  != 'All': ghost = ghost[ghost['Size']       == sz_gp]
+
+    # Filters — row 2: numeric thresholds
     c1,c2,c3 = st.columns(3)
     with c1:
         min_vel = st.number_input("Min True Velocity (sqm/month)", value=50, step=10, key="gp_vel")
@@ -5037,6 +5148,9 @@ High score = was selling fast + stocked out multiple times + sold recently = def
 elif page == "🟣 Tail Stock":
     if not is_admin: st.error("Admin only."); st.stop()
     st.title("🟣 Tail Stock")
+    with st.expander("ℹ️ About this report", expanded=False):
+        st.markdown('**What it shows:** Products that sold very well but have a small quantity left over — sitting unsold in the warehouse after being removed from display. These were previously misclassified as Dead Stock.\n\n**Key metrics explained:**\n- **Sell Through %** — >70% confirms the product DID sell. The remainder is a leftover, not a failure.\n- **Velocity Drop %** — How sharply sales declined in the last phase vs the first phase. High drop (>80%) means it was selling fast and then suddenly stopped — classic tail stock signal.\n- **Days Since Last Sale** — How long the tail has been sitting. 90–180 days is recoverable; 365+ days becomes a discount decision.\n- **Suggested Action** — Back to Display (if >20 sqm), Bundle Deal (5–20 sqm), or Clearance (< 5 sqm).')
+
     st.caption("Products that sold well but have a small remainder sitting unsold — likely removed from display, NOT truly dead stock.")
 
     with st.expander("📖 What is Tail Stock?", expanded=False):
@@ -5088,16 +5202,19 @@ True dead stock is only 290 products.
         st.stop()
 
     # Filters
-    c1,c2,c3 = st.columns(3)
+    c1,c2,c3,c4 = st.columns(4)
     with c1:
-        br_t = st.selectbox("Brand", ['All']+sorted(tail['Brand Name'].dropna().unique().tolist()), key="ts_br")
+        br_t = st.selectbox("Brand",    ['All']+sorted(tail['Brand Name'].dropna().unique().tolist()), key="ts_br")
     with c2:
-        cat_t= st.selectbox("Category",['All']+sorted(tail['Category'].dropna().unique().tolist()), key="ts_cat")
+        cat_t= st.selectbox("Category", ['All']+sorted(tail['Category'].dropna().unique().tolist()),   key="ts_cat")
     with c3:
+        sz_t = st.selectbox("Size",     ['All']+sorted(tail['Size'].dropna().unique().tolist()),       key="ts_sz")
+    with c4:
         min_val = st.number_input("Min Stock Value (Rs)", value=0, step=5000, key="ts_val")
 
-    if br_t  != 'All': tail = tail[tail['Brand Name']==br_t]
-    if cat_t != 'All': tail = tail[tail['Category']==cat_t]
+    if br_t  != 'All': tail = tail[tail['Brand Name'] == br_t]
+    if cat_t != 'All': tail = tail[tail['Category']   == cat_t]
+    if sz_t  != 'All': tail = tail[tail['Size']       == sz_t]
     tail = tail[tail['Stock Value PKR'] >= min_val]
 
     # Metrics
@@ -5207,6 +5324,9 @@ True dead stock is only 290 products.
 elif page == "⚙️ Metrics Config":
     if not is_admin: st.error("Admin only."); st.stop()
     st.title("⚙️ Metrics Configuration")
+    with st.expander("ℹ️ About this report", expanded=False):
+        st.markdown("**What it shows:** Control panel for all the thresholds and parameters that drive the dashboard's classifications and alerts.\n\n**Key settings explained:**\n- **Dead Stock Days** — How many days without a sale before a product is classified as Dead. Default: 180 days.\n- **Fast Mover Velocity** — Minimum sqm/month to qualify as a Fast Mover. Default: 50 sqm/month.\n- **Reorder Lead Time** — Days to factor in for supplier delivery when triggering reorder alerts.\n- **Churn Overdue Multiplier** — How many times past their normal buying interval a customer must be before being flagged as at-risk. Default: 2×.")
+
     st.caption("All thresholds and formula parameters — change here, dashboard updates instantly. Changes apply to current session.")
 
     cfg = get_config()
@@ -5442,6 +5562,9 @@ elif page == "⚙️ Metrics Config":
 # ─────────────────────────────────────────────
 elif page == "📋 Sales & Profit Report":
     st.title("📋 Sales & Profit Report")
+    with st.expander("ℹ️ About this report", expanded=False):
+        st.markdown("**What it shows:** A detailed breakdown of every product's sales, returns, and actual profitability — with real supplier costs applied, not ERP estimates.\n\n**Key metrics explained:**\n- **Sale Value** — Total invoiced amount for this product in the period (before returns).\n- **Returns** — Value of goods returned by customers. Net Revenue = Sale Value − Returns.\n- **Cost/Sqm** — Actual supplier cost (WAC/FIFO) per sqm for this product.\n- **Act Profit** — Sale Value − (Cost/Sqm × Sqm Sold). The real profit using actual purchase costs. Drill down into any row to see transaction-level detail with cost columns.")
+
     st.caption("All-time sales data with date range filter, profit columns, and full drill-down. Export to CSV.")
 
     with st.expander("🔍 Filters", expanded=True):
@@ -5470,8 +5593,9 @@ elif page == "📋 Sales & Profit Report":
         with c1:
             _sal = st.selectbox("Salesman", ['All'] + sorted(df['Salesman'].dropna().unique().tolist()), key="spr_sal")
         with c2:
-            _prod_list = ['All'] + sorted(df['Product No.'].dropna().unique().tolist())
-            _prod = st.selectbox("Product No.", _prod_list, key="spr_prod")
+            _prod_srch = st.text_input("🔎 Search Product", key="spr_prod_srch",
+                                       placeholder="Type product name to filter…")
+            _prod = _prod_srch.strip() if _prod_srch.strip() else 'All'
 
         # ── Row 4: View mode ──
         c1, c2 = st.columns(2)
@@ -5491,7 +5615,7 @@ elif page == "📋 Sales & Profit Report":
     if _co  != 'All': _dff = _dff[_dff['Company Name'] == _co]
     if _cat != 'All': _dff = _dff[_dff['Category']     == _cat]
     if _sal != 'All': _dff = _dff[_dff['Salesman']     == _sal]
-    if _prod != 'All': _dff = _dff[_dff['Product No.'] == _prod]
+    if _prod != 'All': _dff = _dff[_dff['Product No.'].str.upper().str.contains(_prod.upper(), na=False)]
     # Size is on prod table — merge-filter
     if _sz != 'All':
         _sz_prods = prod[prod['Size'] == _sz]['Product No.'].tolist()
