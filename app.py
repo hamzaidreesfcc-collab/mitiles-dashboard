@@ -488,7 +488,10 @@ def load_data(path):
                     if r > best_ratio:
                         best_ratio = r
                         best_match = cand
-                if best_ratio >= 0.85 and best_match:
+                # Only fuzzy-match if first word (brand/code) matches too
+                pno_word0 = pno.split()[0] if pno.split() else pno
+                match_word0 = best_match.split()[0] if best_match and best_match.split() else ''
+                if best_ratio >= 0.92 and best_match and pno_word0 == match_word0:
                     supplier_wac[pno] = {**supplier_wac[best_match],
                                          'fuzzy_of': best_match,
                                          'confidence': round(best_ratio*100, 1)}
@@ -907,7 +910,7 @@ with st.spinner("Loading Mi-Tiles data..."):
 
 # ── Force supplier costs to reload if not yet in session ──
 # Version bump forces reload when cost logic changes
-_SUPPLIER_LOGIC_VER = 4
+_SUPPLIER_LOGIC_VER = 5
 if st.session_state.get('_supplier_logic_ver') != _SUPPLIER_LOGIC_VER:
     for _k in ['supplier_wac_map','supplier_source_map','supplier_log']:
         st.session_state.pop(_k, None)
@@ -5557,8 +5560,18 @@ elif page == "📋 Sales & Profit Report":
             _erp_p = _dd_s['Profit'].sum() if 'Profit' in _dd_s.columns else 0
             _sv_dd  = _dd_s['SALE'].sum()
             _de.metric("ERP Margin%",  f"{_erp_p/_sv_dd*100:.1f}%" if _sv_dd > 0 else "—")
+            _wac_dd = st.session_state.get('supplier_wac_map', {})
+            if 'Product No.' in _dd_all.columns and _wac_dd:
+                _dd_all['Cost/Sqm'] = _dd_all['Product No.'].apply(
+                    lambda p: _wac_dd.get(str(p).strip().upper(), None))
+                _dd_all['Total Cost'] = _dd_all.apply(
+                    lambda r: round(r['Cost/Sqm'] * r['Sq.m'], 2) if pd.notna(r.get('Cost/Sqm')) else None, axis=1)
+                _dd_all['Act Profit'] = _dd_all.apply(
+                    lambda r: round(r['SALE'] - r['Total Cost'], 2) if pd.notna(r.get('Total Cost')) else None, axis=1)
             _bill_cols = ['Date', 'Bill No.', 'Account Name', 'Salesman', 'Sq.m', 'SALE', 'RETURN', 'Profit', 'Type']
-            if is_admin and 'Actual Profit' in _dd_all.columns:
+            if 'Cost/Sqm' in _dd_all.columns:
+                _bill_cols += ['Cost/Sqm', 'Total Cost', 'Act Profit']
+            elif is_admin and 'Actual Profit' in _dd_all.columns:
                 _bill_cols.append('Actual Profit')
             _avail_dd = [c for c in _bill_cols if c in _dd_all.columns]
             st.dataframe(_dd_all[_avail_dd], hide_index=True, use_container_width=True)
