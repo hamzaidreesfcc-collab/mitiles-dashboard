@@ -399,33 +399,40 @@ def load_data(path):
                     lambda x: re.sub(r' +', ' ', x.replace('\xa0', ' ')).strip().upper())
             if date_col:
                 df_s[date_col] = pd.to_datetime(df_s[date_col], errors='coerce')
-                df_s = df_s.sort_values(date_col, ascending=True, na_position='last')
+                df_s = df_s.sort_values([date_col, qty_col] if qty_col else [date_col], ascending=[True, False], na_position='last')
             if qty_col:
                 df_s[qty_col] = pd.to_numeric(df_s[qty_col], errors='coerce').fillna(0)
 
-            # ── FIFO batch building ───────────────────────────────
+            # ── FIFO batch building (same product+date → WAC) ──────
+            # First pass: collect all rows per (full_key, date)
+            _batch_acc = {}  # {full_key: {date_str: [('qty','cost',...)]}}
+            _supp_acc  = {}
             loaded = 0
             for _, row in df_s.iterrows():
                 code = row[item_col]
-                # Full key: combine code + name if name is a separate column with extra info
                 if name_col:
                     name_part = row.get(name_col, '')
                     full_key = f"{code} {name_part}".strip() if name_part and name_part not in code else code
                 else:
-                    # Product No. already contains full name e.g. "MSM1282 MONTAGE SILKY MATT TONE H2"
                     full_key = code
-
                 cost = float(row[cost_col])
                 qty  = max(float(row[qty_col]), 0.01) if qty_col else 1.0
                 supp = str(row[supp_col]).strip() if supp_col else source_label
-
-                if full_key not in supplier_wac:
-                    supplier_wac[full_key] = {'batches': [], 'supplier': supp or source_label}
-                # Append batch in arrival order (oldest first after date sort)
-                supplier_wac[full_key]['batches'].append((qty, cost))
-                supplier_wac[full_key]['supplier'] = supp or source_label
-                supplier_match[full_key] = 'exact'
+                d_key = str(row[date_col].date()) if date_col and pd.notna(row.get(date_col)) else 'unknown'
+                _batch_acc.setdefault(full_key, {}).setdefault(d_key, []).append((qty, cost))
+                _supp_acc[full_key] = supp or source_label
                 loaded += 1
+            # Second pass: collapse same-date lines into WAC, keep date order (FIFO)
+            for full_key, date_map in _batch_acc.items():
+                if full_key not in supplier_wac:
+                    supplier_wac[full_key] = {'batches': [], 'supplier': _supp_acc[full_key]}
+                for d_key in sorted(date_map.keys()):
+                    lines = date_map[d_key]
+                    total_qty  = sum(q for q, _ in lines)
+                    wac_cost   = sum(q * c for q, c in lines) / total_qty if total_qty > 0 else lines[0][1]
+                    supplier_wac[full_key]['batches'].append((round(total_qty, 4), round(wac_cost, 2)))
+                supplier_wac[full_key]['supplier'] = _supp_acc[full_key]
+                supplier_match[full_key] = 'exact'
             return loaded, None
 
         # ── Read each supplier workbook ───────────────────────
@@ -914,7 +921,7 @@ with st.spinner("Loading Mi-Tiles data..."):
 
 # ── Force supplier costs to reload if not yet in session ──
 # Version bump forces reload when cost logic changes
-_SUPPLIER_LOGIC_VER = 5
+_SUPPLIER_LOGIC_VER = 7
 if st.session_state.get('_supplier_logic_ver') != _SUPPLIER_LOGIC_VER:
     for _k in ['supplier_wac_map','supplier_source_map','supplier_log']:
         st.session_state.pop(_k, None)
@@ -997,11 +1004,12 @@ if 'supplier_wac_map' not in st.session_state:
                     lambda x: re.sub(r' +', ' ', x.replace('\xa0', ' ')).strip().upper())
             if date_col:
                 df_s[date_col] = pd.to_datetime(df_s[date_col], errors='coerce')
-                df_s = df_s.sort_values(date_col, ascending=True, na_position='last')
+                df_s = df_s.sort_values([date_col, qty_col] if qty_col else [date_col], ascending=[True, False], na_position='last')
             if qty_col:
                 df_s[qty_col] = pd.to_numeric(df_s[qty_col], errors='coerce').fillna(0)
 
-            n = 0
+            # Same-date lines → WAC; across dates → FIFO
+            _bacc = {}; _sacc = {}; n = 0
             for _, row in df_s.iterrows():
                 code = row[item_col]
                 if name_col:
@@ -1009,17 +1017,22 @@ if 'supplier_wac_map' not in st.session_state:
                     full_key = f"{code} {name_part}".strip() if name_part and name_part not in code else code
                 else:
                     full_key = code
-
                 cost = float(row[cost_col])
                 qty  = max(float(row[qty_col]), 0.01) if qty_col else 1.0
                 supp = str(row[supp_col]).strip() if supp_col else label
-
+                d_key = str(row[date_col].date()) if date_col and pd.notna(row.get(date_col)) else 'unknown'
+                _bacc.setdefault(full_key, {}).setdefault(d_key, []).append((qty, cost))
+                _sacc[full_key] = supp; n += 1
+            for full_key, date_map in _bacc.items():
                 if full_key not in _supplier_wac:
-                    _supplier_wac[full_key] = {'batches': [], 'supplier': supp}
-                _supplier_wac[full_key]['batches'].append((qty, cost))
-                _supplier_wac[full_key]['supplier'] = supp
+                    _supplier_wac[full_key] = {'batches': [], 'supplier': _sacc[full_key]}
+                for d_key in sorted(date_map.keys()):
+                    lines = date_map[d_key]
+                    tq = sum(q for q, _ in lines)
+                    wc = sum(q * c for q, c in lines) / tq if tq > 0 else lines[0][1]
+                    _supplier_wac[full_key]['batches'].append((round(tq, 4), round(wc, 2)))
+                _supplier_wac[full_key]['supplier'] = _sacc[full_key]
                 _supplier_match[full_key] = 'exact'
-                n += 1
             return n, None
 
         _fids = st.secrets.get("SUPPLIER_FILE_IDS", "")
