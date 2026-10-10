@@ -4121,17 +4121,38 @@ Your supplier files need a sheet with these columns (same as your ERP export):
     else:
         st.info(f"🔍 Debug: supplier_log is empty. SUPPLIER_FILE_IDS secret = `{st.secrets.get('SUPPLIER_FILE_IDS', 'NOT FOUND')}`")
 
-    # ── Quick product cost lookup ─────────────────────────────
-    with st.expander("🔎 Check cost for a specific product", expanded=False):
-        _lookup = st.text_input("Enter Product No. (e.g. MSM1288)", key="sc_lookup").strip().upper()
+    # ── Cost Debugger ─────────────────────────────────────────
+    with st.expander("🔎 Cost Lookup Debugger", expanded=True):
+        _lookup_raw = st.text_input("Type any product name (partial OK — searches all keys)",
+                                    key="sc_lookup", placeholder="e.g. MARMI ORVIN or MSM1282")
+        _lookup = _lookup_raw.strip().upper()
         if _lookup:
+            # 1. Exact match
             if _lookup in supplier_map:
-                st.success(f"✅ **{_lookup}** → Cost: **Rs {supplier_map[_lookup]:,.2f}** | Match: {source_map.get(_lookup, '—')}")
+                st.success(f"✅ **Exact match** | Key: `{_lookup}` | Cost: **Rs {supplier_map[_lookup]:,.2f}** | Source: {source_map.get(_lookup, '—')}")
             else:
-                st.warning(f"❌ **{_lookup}** not found in supplier cost map. It will use WAC estimate.")
-                # Show a few close matches
-                _close = [k for k in supplier_map if k.startswith(_lookup[:4])][:5]
-                if _close: st.caption(f"Similar keys: {', '.join(_close)}")
+                st.warning(f"⚠️ No exact match for `{_lookup}`")
+            # 2. Partial / contains matches
+            _contains = [(k, supplier_map[k], source_map.get(k, '—')) for k in supplier_map if _lookup in k]
+            if _contains:
+                st.markdown("**🟢 Supplier map keys containing your search:**")
+                st.dataframe(pd.DataFrame(_contains, columns=["Supplier Map Key", "Cost (Rs/sqm)", "Source"]),
+                             hide_index=True, use_container_width=True)
+            else:
+                st.error("No supplier map key contains this text at all.")
+                _starts = [(k, supplier_map[k]) for k in supplier_map if k.startswith(_lookup[:6])][:10]
+                if _starts:
+                    st.markdown("**Keys sharing first 6 chars:**")
+                    st.dataframe(pd.DataFrame(_starts, columns=["Key", "Cost"]), hide_index=True, use_container_width=True)
+        st.divider()
+        _all_keys_df = pd.DataFrame(
+            [(k, v, source_map.get(k, '—')) for k, v in supplier_map.items()],
+            columns=["Supplier Map Key", "Cost (Rs/sqm)", "Source"]
+        ).sort_values("Supplier Map Key")
+        st.caption(f"Total keys loaded in supplier map: {len(supplier_map):,}")
+        st.download_button("📥 Download ALL supplier map keys (for inspection)",
+                           _all_keys_df.to_csv(index=False),
+                           "supplier_map_keys.csv", "text/csv", key="dl_smk")
 
     if not supplier_map:
         st.warning("No supplier cost data loaded.")
@@ -5556,14 +5577,25 @@ elif page == "📋 Sales & Profit Report":
             _dd_s = _sales_d[_sales_d[filter_col] == filter_val].copy() if filter_col in _sales_d.columns else _sales_d.copy()
             _dd_r = _returns_d[_returns_d[filter_col] == filter_val].copy() if filter_col in _returns_d.columns else _returns_d.copy()
             _dd_all = pd.concat([_dd_s, _dd_r], ignore_index=True).sort_values('Date', ascending=False)
-            _da, _db, _dc, _dd2, _de = st.columns(5)
-            _da.metric("Sale Value",   fmt_m(_dd_s['SALE'].sum()))
-            _db.metric("Sale Sqm",     f"{_dd_s['Sq.m'].sum():,.1f}")
-            _dc.metric("Returns",      fmt_m(_dd_r['RETURN'].sum()))
-            _dd2.metric("Net Sqm",     f"{_dd_s['Sq.m'].sum()-_dd_r['Sq.m'].sum():,.1f}")
-            _erp_p = _dd_s['Profit'].sum() if 'Profit' in _dd_s.columns else 0
+
+            # ── KPI row ────────────────────────────────────────────
             _sv_dd  = _dd_s['SALE'].sum()
-            _de.metric("ERP Margin%",  f"{_erp_p/_sv_dd*100:.1f}%" if _sv_dd > 0 else "—")
+            _sq_s   = _dd_s['Sq.m'].sum()
+            _sq_r   = _dd_r['Sq.m'].sum()
+            _sale_rate = _sv_dd / _sq_s if _sq_s > 0 else 0
+            _ret_val   = _dd_r['RETURN'].sum()
+            _ret_rate  = _ret_val / _sq_r if _sq_r > 0 else 0
+            _erp_p  = _dd_s['Profit'].sum() if 'Profit' in _dd_s.columns else 0
+            _da, _db, _dc, _dd2, _de, _df2, _dg = st.columns(7)
+            _da.metric("Sale Value",    fmt_m(_sv_dd))
+            _db.metric("Sale Sqm",      f"{_sq_s:,.1f}")
+            _dc.metric("Sale Rate/Sqm", f"{_sale_rate:,.0f}")
+            _dd2.metric("Returns",      fmt_m(_ret_val))
+            _de.metric("Ret Rate/Sqm",  f"{_ret_rate:,.0f}" if _sq_r > 0 else "—")
+            _df2.metric("Net Sqm",      f"{_sq_s - _sq_r:,.1f}")
+            _dg.metric("ERP Margin%",   f"{_erp_p/_sv_dd*100:.1f}%" if _sv_dd > 0 else "—")
+
+            # ── Cost columns ───────────────────────────────────────
             _wac_dd = st.session_state.get('supplier_wac_map', {})
             if 'Product No.' in _dd_all.columns and _wac_dd:
                 _dd_all['Cost/Sqm'] = _dd_all['Product No.'].apply(
@@ -5572,14 +5604,24 @@ elif page == "📋 Sales & Profit Report":
                     lambda r: round(r['Cost/Sqm'] * r['Sq.m'], 2) if pd.notna(r.get('Cost/Sqm')) else None, axis=1)
                 _dd_all['Act Profit'] = _dd_all.apply(
                     lambda r: round(r['SALE'] - r['Total Cost'], 2) if pd.notna(r.get('Total Cost')) else None, axis=1)
-            _bill_cols = ['Date', 'Bill No.', 'Account Name', 'Salesman', 'Sq.m', 'SALE', 'RETURN', 'Profit', 'Type']
+
+            # ── Search bar ─────────────────────────────────────────
+            _srch = st.text_input("🔎 Search product / account / bill",
+                                  key=f"dd_srch_{filter_col}_{str(filter_val)[:20]}")
+            if _srch.strip():
+                _mask = _dd_all.apply(
+                    lambda r: _srch.strip().lower() in ' '.join(r.astype(str).values).lower(), axis=1)
+                _dd_all = _dd_all[_mask]
+
+            # ── Table ──────────────────────────────────────────────
+            _bill_cols = ['Date', 'Bill No.', 'Product No.', 'Account Name', 'Salesman', 'Sq.m', 'SALE', 'RETURN', 'Profit', 'Type']
             if 'Cost/Sqm' in _dd_all.columns:
                 _bill_cols += ['Cost/Sqm', 'Total Cost', 'Act Profit']
             elif is_admin and 'Actual Profit' in _dd_all.columns:
                 _bill_cols.append('Actual Profit')
             _avail_dd = [c for c in _bill_cols if c in _dd_all.columns]
             st.dataframe(_dd_all[_avail_dd], hide_index=True, use_container_width=True)
-            st.caption(f"{len(_dd_all)} transaction lines | {_dd_s['Bill No.'].nunique() if 'Bill No.' in _dd_s.columns else '—'} bills")
+            st.caption(f"{len(_dd_all)} lines shown | {_dd_s['Bill No.'].nunique() if 'Bill No.' in _dd_s.columns else '—'} bills total")
             st.download_button("📥 Download drill-down CSV", _dd_all[_avail_dd].to_csv(index=False),
                                f"drilldown_{str(filter_val)[:20]}.csv", "text/csv",
                                key=f"dd_dl_{filter_col}_{str(filter_val)[:30]}")
