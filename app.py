@@ -484,14 +484,18 @@ def load_data(path):
                 best_ratio = 0.0
                 best_match = None
                 for cand in matched_list:
-                    r = SequenceMatcher(None, pno[:20], cand[:20]).ratio()
+                    r = SequenceMatcher(None, pno, cand).ratio()
                     if r > best_ratio:
                         best_ratio = r
                         best_match = cand
                 # Only fuzzy-match if first word (brand/code) matches too
                 pno_word0 = pno.split()[0] if pno.split() else pno
                 match_word0 = best_match.split()[0] if best_match and best_match.split() else ''
-                if best_ratio >= 0.92 and best_match and pno_word0 == match_word0:
+                same_code = (pno_word0 == match_word0)
+                # If they share the same numeric/product code, they are variants —
+                # never fuzzy-assign cost between variants (e.g. TONE H2 vs COMM).
+                # Only fuzzy-match across genuinely different names (different code prefix).
+                if best_ratio >= 0.92 and best_match and not same_code:
                     supplier_wac[pno] = {**supplier_wac[best_match],
                                          'fuzzy_of': best_match,
                                          'confidence': round(best_ratio*100, 1)}
