@@ -253,6 +253,17 @@ def _extract_family(p):
     return p
 
 @st.cache_data(ttl=3600)
+def _get_qualifier(name: str) -> str:
+    n = name.upper()
+    if 'AAA' in n: return 'AAA'
+    if 'COMM' in n: return 'COMM'
+    if 'STD' in n: return 'STD'
+    return ''
+
+def _extract_code(name: str) -> str:
+    parts = name.strip().split()
+    return parts[0] if parts else name
+
 def load_data(path):
     import io
     import requests
@@ -527,17 +538,6 @@ def load_data(path):
         st.session_state['supplier_wac_map']    = supplier_wac_map
         st.session_state['supplier_source_map'] = supplier_source_map
 
-    
-def _get_qualifier(name: str) -> str:
-    n = name.upper()
-    if 'AAA' in n: return 'AAA'
-    if 'COMM' in n: return 'COMM'
-    if 'STD' in n: return 'STD'
-    return ''
-
-def _extract_code(name: str) -> str:
-    parts = name.strip().split()
-    return parts[0] if parts else name
 
     def ap(row):
         pno = str(row.get('Product No.','')).upper()
