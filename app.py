@@ -6362,6 +6362,351 @@ elif page == "🤖 AI Insights":
     # RENDER
     # ════════════════════════════════════════════════════════════════════
 
+    # ── ASK THE DATA ─────────────────────────────────────────────────────────
+    st.subheader("💬 Ask the Data")
+    st.caption("Click any question — the answer is generated from your live ERP data.")
+
+    _QUESTIONS = {
+        "🏆 Best product last month?":             "best_product_month",
+        "📉 Worst product last month?":            "worst_product_month",
+        "👤 Top customer this month?":             "top_customer_month",
+        "💸 Which products are we losing money on?": "loss_products",
+        "📦 What should we reorder urgently?":     "reorder_urgent",
+        "📐 Which size category sells the most?":  "best_size",
+        "🏷️ Which brand has best margin?":         "best_brand_margin",
+        "📊 How did this month vs last month?":    "month_compare",
+        "⚠️ Which customers haven't ordered in 60+ days?": "inactive_customers",
+        "🔻 Which products should we consider discontinuing?": "discontinue",
+        "📅 Which day of week has highest sales?": "best_dow",
+        "💰 What's our gross margin trend (6 months)?": "gm_trend",
+        "🚀 Fastest growing product (last 3 months vs prior 3)?": "fastest_growing",
+        "🧾 Largest single bill ever?":            "largest_bill",
+        "🔁 Most returned product?":               "most_returned",
+    }
+
+    # Question buttons — 3 per row
+    _q_keys   = list(_QUESTIONS.keys())
+    _q_ids    = list(_QUESTIONS.values())
+    if 'ai_q_sel' not in st.session_state:
+        st.session_state['ai_q_sel'] = None
+
+    _n_cols = 3
+    for _row_start in range(0, len(_q_keys), _n_cols):
+        _btn_cols = st.columns(_n_cols)
+        for _ci, _qi in enumerate(range(_row_start, min(_row_start+_n_cols, len(_q_keys)))):
+            _btn_type = "primary" if st.session_state['ai_q_sel'] == _q_ids[_qi] else "secondary"
+            if _btn_cols[_ci].button(_q_keys[_qi], key=f"aiq_{_qi}", use_container_width=True, type=_btn_type):
+                st.session_state['ai_q_sel'] = _q_ids[_qi]
+                st.rerun()
+
+    # ── Generate answer ───────────────────────────────────────────────────────
+    _sel = st.session_state.get('ai_q_sel')
+    if _sel:
+        st.divider()
+        _ans_box = st.container()
+        with _ans_box:
+
+            def _fmt(n, prefix="Rs ", suffix=""):
+                if n >= 1_000_000: return f"{prefix}{n/1_000_000:.2f}M{suffix}"
+                if n >= 1_000:     return f"{prefix}{n/1_000:.1f}K{suffix}"
+                return f"{prefix}{n:,.0f}{suffix}"
+
+            _this_m_str = str(_today.to_period('M'))
+            _prev_m_str = str((_today - pd.DateOffset(months=1)).to_period('M'))
+            _s_tm = _sales[pd.to_datetime(_sales['Date']).dt.to_period('M').astype(str) == _this_m_str]
+            _s_pm = _sales[pd.to_datetime(_sales['Date']).dt.to_period('M').astype(str) == _prev_m_str]
+
+            # ── best_product_month ──────────────────────────────────────────
+            if _sel == "best_product_month":
+                _gp = _s_pm.groupby('Product No.').agg(Revenue=('SALE','sum'), Sqm=('Sq.m','sum'), GP=('Profit','sum')).reset_index()
+                if _gp.empty:
+                    st.info("No sales data for last month.")
+                else:
+                    _top = _gp.sort_values('Revenue', ascending=False).iloc[0]
+                    _gm  = round(_top['GP']/_top['Revenue']*100,1) if _top['Revenue']>0 else 0
+                    _share = round(_top['Revenue']/_gp['Revenue'].sum()*100,1)
+                    _port_gm = round(_gp['GP'].sum()/_gp['Revenue'].sum()*100,1) if _gp['Revenue'].sum()>0 else 0
+                    st.success(f"""
+**🏆 Best Product — {_prev_m_str}**
+
+**{_top['Product No.']}** led all products with **{_fmt(_top['Revenue'])}** in revenue across **{_top['Sqm']:,.0f} sq.m** sold.
+
+It captured **{_share}%** of total monthly revenue and delivered a gross margin of **{_gm}%** — {'above' if _gm>_port_gm else 'below'} the portfolio average of **{_port_gm}%**.
+                    """)
+
+            # ── worst_product_month ─────────────────────────────────────────
+            elif _sel == "worst_product_month":
+                _gp = _s_pm.groupby('Product No.').agg(Revenue=('SALE','sum'), GP=('Profit','sum'), Sqm=('Sq.m','sum')).reset_index()
+                _gp = _gp[_gp['Revenue'] > 0]
+                if _gp.empty:
+                    st.info("No sales data for last month.")
+                else:
+                    _gp['GM%'] = _gp['GP']/_gp['Revenue']*100
+                    _bot = _gp.sort_values('GM%').iloc[0]
+                    st.warning(f"""
+**📉 Worst Margin Product — {_prev_m_str}**
+
+**{_bot['Product No.']}** had the lowest gross margin at **{_bot['GM%']:.1f}%** on {_fmt(_bot['Revenue'])} revenue ({_bot['Sqm']:,.0f} sq.m).
+
+{'This product is being sold at a loss.' if _bot['GM%'] < 0 else 'Consider reviewing pricing or supplier cost for this product.'}
+                    """)
+
+            # ── top_customer_month ──────────────────────────────────────────
+            elif _sel == "top_customer_month":
+                _gc = _s_tm.groupby('Account Name').agg(Revenue=('SALE','sum'), Bills=('Bill No.','nunique'), Sqm=('Sq.m','sum')).reset_index()
+                if _gc.empty:
+                    st.info("No sales data yet this month.")
+                else:
+                    _tc = _gc.sort_values('Revenue', ascending=False).iloc[0]
+                    _share = round(_tc['Revenue']/_gc['Revenue'].sum()*100,1)
+                    st.success(f"""
+**👤 Top Customer — {_this_m_str}**
+
+**{_tc['Account Name']}** is your highest-revenue customer this month with **{_fmt(_tc['Revenue'])}** across **{int(_tc['Bills'])} bill(s)** and **{_tc['Sqm']:,.0f} sq.m** purchased.
+
+They account for **{_share}%** of this month's total revenue.
+                    """)
+
+            # ── loss_products ───────────────────────────────────────────────
+            elif _sel == "loss_products":
+                _lp = (_sales[_sales['Date'] >= _today - pd.Timedelta(days=90)]
+                       .groupby('Product No.')
+                       .agg(Revenue=('SALE','sum'), GP=('Profit','sum'))
+                       .reset_index())
+                _lp = _lp[(_lp['Revenue']>0) & (_lp['GP']<0)].sort_values('GP')
+                if _lp.empty:
+                    st.success("✅ No products sold at a loss in the last 90 days.")
+                else:
+                    _total_loss = abs(_lp['GP'].sum())
+                    _list = "\n".join([f"- **{r['Product No.']}** → Loss of {_fmt(abs(r['GP']))} on {_fmt(r['Revenue'])} revenue" for _,r in _lp.head(8).iterrows()])
+                    st.error(f"""
+**💸 Products Sold at a Loss (last 90 days)**
+
+**{len(_lp)} products** generated negative profit, costing you a total of **{_fmt(_total_loss)}** in gross loss:
+
+{_list}
+
+*Action: Review pricing or check if supplier cost data is accurate for these products.*
+                    """)
+
+            # ── reorder_urgent ──────────────────────────────────────────────
+            elif _sel == "reorder_urgent":
+                _urg = _sv[(_sv['Daily Sqm']>0) & (_sv['Days of Stock']<14)].sort_values('Days of Stock')
+                if _urg.empty:
+                    st.success("✅ No products critically low on stock right now (all have >14 days of cover).")
+                else:
+                    _list = "\n".join([f"- **{r['Product No.']}** — only **{r['Days of Stock']:.0f} days** left ({r['Stock (Sq.m)']:,.0f} sq.m at {r['Daily Sqm']:.1f} sq.m/day)" for _,r in _urg.head(8).iterrows()])
+                    st.error(f"""
+**📦 Urgent Reorders — {len(_urg)} products under 14 days of stock**
+
+{_list}
+
+*Place purchase orders for these immediately to avoid stock-outs.*
+                    """)
+
+            # ── best_size ───────────────────────────────────────────────────
+            elif _sel == "best_size":
+                if 'Size' not in _sales.columns:
+                    st.info("Size data not available.")
+                else:
+                    _sz = _sales.groupby('Size').agg(Revenue=('SALE','sum'), Sqm=('Sq.m','sum')).reset_index().sort_values('Revenue',ascending=False)
+                    _sz = _sz[_sz['Size'].notna()]
+                    _top_sz = _sz.iloc[0]
+                    _share  = round(_top_sz['Revenue']/_sz['Revenue'].sum()*100,1)
+                    _top3   = "\n".join([f"{i+1}. **{r['Size']}** — {_fmt(r['Revenue'])} ({round(r['Revenue']/_sz['Revenue'].sum()*100,1)}% of sales)" for i,(_,r) in enumerate(_sz.head(3).iterrows())])
+                    st.success(f"""
+**📐 Best Selling Size Category (all time)**
+
+**{_top_sz['Size']}** is your dominant size with **{_fmt(_top_sz['Revenue'])}** in total revenue — **{_share}%** of all sales.
+
+**Top 3 sizes by revenue:**
+{_top3}
+                    """)
+
+            # ── best_brand_margin ───────────────────────────────────────────
+            elif _sel == "best_brand_margin":
+                if 'Brand Name' not in _sales.columns:
+                    st.info("Brand data not available.")
+                else:
+                    _br = (_sales.groupby('Brand Name')
+                           .agg(Revenue=('SALE','sum'), GP=('Profit','sum'))
+                           .reset_index())
+                    _br = _br[_br['Revenue'] > 50000]
+                    _br['GM%'] = (_br['GP']/_br['Revenue']*100).round(1)
+                    _br = _br.sort_values('GM%', ascending=False)
+                    _top_br = _br.iloc[0]
+                    _list = "\n".join([f"{i+1}. **{r['Brand Name']}** — {r['GM%']}% margin on {_fmt(r['Revenue'])}" for i,(_,r) in enumerate(_br.head(5).iterrows())])
+                    st.success(f"""
+**🏷️ Brand Margin Rankings (all time, min Rs 50K revenue)**
+
+**{_top_br['Brand Name']}** leads with the highest gross margin at **{_top_br['GM%']}%**.
+
+**Top 5 brands by margin:**
+{_list}
+                    """)
+
+            # ── month_compare ───────────────────────────────────────────────
+            elif _sel == "month_compare":
+                _cm_rev = _s_tm['SALE'].sum(); _pm_rev = _s_pm['SALE'].sum()
+                _cm_gp  = _s_tm['Profit'].sum(); _pm_gp  = _s_pm['Profit'].sum()
+                _cm_sqm = _s_tm['Sq.m'].sum();  _pm_sqm = _s_pm['Sq.m'].sum()
+                _rev_chg = round((_cm_rev-_pm_rev)/_pm_rev*100,1) if _pm_rev>0 else 0
+                _gp_chg  = round((_cm_gp -_pm_gp )/_pm_gp *100,1) if _pm_gp >0 else 0
+                _icon_r  = "📈" if _rev_chg>=0 else "📉"
+                _icon_g  = "📈" if _gp_chg>=0 else "📉"
+                st.info(f"""
+**📊 {_this_m_str} vs {_prev_m_str}**
+
+| Metric | {_prev_m_str} | {_this_m_str} | Change |
+|---|---|---|---|
+| Revenue | {_fmt(_pm_rev)} | {_fmt(_cm_rev)} | {_icon_r} {_rev_chg:+.1f}% |
+| Gross Profit | {_fmt(_pm_gp)} | {_fmt(_cm_gp)} | {_icon_g} {_gp_chg:+.1f}% |
+| Volume (sq.m) | {_pm_sqm:,.0f} | {_cm_sqm:,.0f} | {'↑' if _cm_sqm>=_pm_sqm else '↓'} {round((_cm_sqm-_pm_sqm)/_pm_sqm*100,1) if _pm_sqm>0 else 0:+.1f}% |
+| GP Margin | {round(_pm_gp/_pm_rev*100,1) if _pm_rev>0 else 0}% | {round(_cm_gp/_cm_rev*100,1) if _cm_rev>0 else 0}% | — |
+
+*Note: {_this_m_str} may be incomplete if the month is still in progress.*
+                """)
+
+            # ── inactive_customers ──────────────────────────────────────────
+            elif _sel == "inactive_customers":
+                _cut60 = _today - pd.Timedelta(days=60)
+                _active = set(_sales[_sales['Date'] >= _cut60]['Account Name'].unique())
+                _all_c  = _sales.groupby('Account Name').agg(Last=('Date','max'), Revenue=('SALE','sum'), Bills=('Bill No.','nunique')).reset_index()
+                _inactive = _all_c[~_all_c['Account Name'].isin(_active)].sort_values('Revenue', ascending=False)
+                if _inactive.empty:
+                    st.success("✅ All customers who ever bought from you have purchased in the last 60 days.")
+                else:
+                    _val = _inactive.head(5)
+                    _list = "\n".join([f"- **{r['Account Name']}** — last purchase {r['Last'].strftime('%d %b %Y')}, lifetime spend {_fmt(r['Revenue'])}" for _,r in _val.iterrows()])
+                    st.warning(f"""
+**⚠️ {len(_inactive)} customers haven't ordered in 60+ days**
+
+Top by lifetime value:
+{_list}
+
+*These are warm leads — they've bought before. A follow-up call could recover revenue.*
+                    """)
+
+            # ── discontinue ─────────────────────────────────────────────────
+            elif _sel == "discontinue":
+                _disc = _rat[_rat['Rationalise Score'] >= 75].head(10)
+                if _disc.empty:
+                    st.success("✅ No products currently meet the discontinuation threshold (score ≥ 75).")
+                else:
+                    _cap = _disc['Capital (Rs)'].sum() if 'Capital (Rs)' in _disc.columns else 0
+                    _list = "\n".join([f"- **{r['Product No.']}** — Score {r['Rationalise Score']:.0f}/100, stock {r['Stock (Sq.m)']:,.0f} sq.m, 90d sales Rs {r.get('Sales90',0):,.0f}" for _,r in _disc.iterrows()])
+                    st.warning(f"""
+**🔻 {len(_disc)} products recommended for discontinuation**
+
+These have high stock, low recent sales, and low margins (score ≥ 75/100):
+
+{_list}
+
+{'**Capital tied up in these SKUs: ' + _fmt(_cap) + '**' if _cap else ''}
+
+*Consider a clearance sale or returning stock to supplier where possible.*
+                    """)
+
+            # ── best_dow ────────────────────────────────────────────────────
+            elif _sel == "best_dow":
+                _dow_map = {0:'Monday',1:'Tuesday',2:'Wednesday',3:'Thursday',4:'Friday',5:'Saturday',6:'Sunday'}
+                _s_dow = _sales.copy()
+                _s_dow['DOW'] = pd.to_datetime(_s_dow['Date']).dt.dayofweek
+                _dow = _s_dow.groupby('DOW').agg(Revenue=('SALE','sum'), Bills=('Bill No.','nunique')).reset_index()
+                _dow['Day'] = _dow['DOW'].map(_dow_map)
+                _dow = _dow.sort_values('Revenue', ascending=False)
+                _best = _dow.iloc[0]; _worst = _dow.iloc[-1]
+                _list = "\n".join([f"{i+1}. **{r['Day']}** — {_fmt(r['Revenue'])} ({int(r['Bills'])} bills)" for i,(_,r) in enumerate(_dow.iterrows())])
+                st.success(f"""
+**📅 Sales by Day of Week (all time)**
+
+**{_best['Day']}** is your best day with **{_fmt(_best['Revenue'])}** in cumulative revenue across **{int(_best['Bills'])} bills**.
+**{_worst['Day']}** is the quietest day.
+
+**Full ranking:**
+{_list}
+                """)
+
+            # ── gm_trend ────────────────────────────────────────────────────
+            elif _sel == "gm_trend":
+                _s6 = _sales.copy()
+                _s6['Month'] = pd.to_datetime(_s6['Date']).dt.to_period('M')
+                _mn = _s6['Month'].max()
+                _months6 = [str(_mn - i) for i in range(5,-1,-1)]
+                _gm6 = (_s6.groupby('Month').agg(Revenue=('SALE','sum'), GP=('Profit','sum')).reset_index())
+                _gm6['Month'] = _gm6['Month'].astype(str)
+                _gm6['GM%'] = (_gm6['GP']/_gm6['Revenue']*100).round(1)
+                _gm6 = _gm6[_gm6['Month'].isin(_months6)].sort_values('Month')
+                _list = "\n".join([f"- **{r['Month']}**: {r['GM%']}% margin on {_fmt(r['Revenue'])}" for _,r in _gm6.iterrows()])
+                _trend = "improving 📈" if len(_gm6)>1 and _gm6['GM%'].iloc[-1] > _gm6['GM%'].iloc[0] else "declining 📉" if len(_gm6)>1 else "stable"
+                st.info(f"""
+**💰 Gross Margin Trend — Last 6 Months**
+
+Your margin is **{_trend}** — from **{_gm6['GM%'].iloc[0]}%** to **{_gm6['GM%'].iloc[-1]}%**.
+
+{_list}
+                """)
+
+            # ── fastest_growing ─────────────────────────────────────────────
+            elif _sel == "fastest_growing":
+                _cut3 = _today - pd.Timedelta(days=90)
+                _cut6 = _today - pd.Timedelta(days=180)
+                _r_now  = _sales[_sales['Date'] >= _cut3].groupby('Product No.')['SALE'].sum()
+                _r_prev = _sales[(_sales['Date'] >= _cut6) & (_sales['Date'] < _cut3)].groupby('Product No.')['SALE'].sum()
+                _grow = pd.DataFrame({'Now': _r_now, 'Prev': _r_prev}).fillna(0)
+                _grow = _grow[(_grow['Prev'] > 10000) & (_grow['Now'] > 10000)]
+                _grow['Growth%'] = ((_grow['Now']-_grow['Prev'])/_grow['Prev']*100).round(1)
+                _grow = _grow.sort_values('Growth%', ascending=False).head(5)
+                if _grow.empty:
+                    st.info("Not enough data to compare periods.")
+                else:
+                    _list = "\n".join([f"{i+1}. **{p}** — grew **{r['Growth%']:+.0f}%** ({_fmt(r['Prev'])} → {_fmt(r['Now'])})" for i,(p,r) in enumerate(_grow.iterrows())])
+                    st.success(f"""
+**🚀 Fastest Growing Products (last 90 days vs prior 90 days)**
+
+{_list}
+                    """)
+
+            # ── largest_bill ────────────────────────────────────────────────
+            elif _sel == "largest_bill":
+                _bill_tot = _sales.groupby(['Bill No.','Account Name','Date']).agg(Revenue=('SALE','sum'), Sqm=('Sq.m','sum')).reset_index()
+                _big = _bill_tot.sort_values('Revenue', ascending=False).iloc[0]
+                st.success(f"""
+**🧾 Largest Single Bill Ever**
+
+**Bill {_big['Bill No.']}** — issued to **{_big['Account Name']}** on **{pd.to_datetime(_big['Date']).strftime('%d %b %Y')}**
+
+- Revenue: **{_fmt(_big['Revenue'])}**
+- Volume: **{_big['Sqm']:,.0f} sq.m**
+                """)
+
+            # ── most_returned ───────────────────────────────────────────────
+            elif _sel == "most_returned":
+                _ret = df[df['Type']=='S.R'].copy()
+                if _ret.empty:
+                    st.success("✅ No returns recorded in the data.")
+                else:
+                    _rg = _ret.groupby('Product No.').agg(ReturnSqm=('Sq.m','sum'), ReturnVal=('SALE','sum')).reset_index().sort_values('ReturnSqm',ascending=False)
+                    _top_ret = _rg.iloc[0]
+                    _total_ret_val = _rg['ReturnVal'].sum()
+                    _list = "\n".join([f"{i+1}. **{r['Product No.']}** — {r['ReturnSqm']:,.0f} sq.m returned ({_fmt(abs(r['ReturnVal']))})" for i,(_,r) in enumerate(_rg.head(5).iterrows())])
+                    st.warning(f"""
+**🔁 Most Returned Products**
+
+Total return value across all time: **{_fmt(abs(_total_ret_val))}**
+
+**Top 5 by return volume:**
+{_list}
+
+*High returns may indicate quality issues, wrong product delivered, or customer expectation mismatch.*
+                    """)
+
+        if st.button("✖ Clear Answer", key="ai_clear"):
+            st.session_state['ai_q_sel'] = None
+            st.rerun()
+
+    st.divider()
+
     # ── Action Summary Strip ─────────────────────────────────────────────────
     st.subheader("🚨 Action Summary")
     ac1,ac2,ac3,ac4,ac5,ac6 = st.columns(6)
