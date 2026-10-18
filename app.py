@@ -1128,6 +1128,7 @@ with st.sidebar:
         "🎨 Design Brief Tool","🔍 Product Audit","💡 Investment Advisor","📋 Audit Log","💰 Supplier Costs","📖 Formula Guide","⚙️ Metrics Config","⚔️ Product Showdown","👻 Ghost Performers","🟣 Tail Stock",
         "📋 Sales & Profit Report",
         "🚛 Labour Costs",
+        "🤖 AI Insights",
     ]
     _role = st.session_state.get('role','viewer')
     _allowed = _all_pages if ROLE_PAGES.get(_role)=="all" else ROLE_PAGES.get(_role, _all_pages[:3])
@@ -6141,3 +6142,416 @@ elif page == "🚛 Labour Costs":
     _export_df['Date'] = _export_df['Date'].dt.strftime('%Y-%m-%d')
     st.download_button("📥 Download Labour Cost CSV", _export_df.to_csv(index=False),
                        "labour_costs.csv", "text/csv", key="lc_dl")
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# AI INSIGHTS PAGE
+# ═════════════════════════════════════════════════════════════════════════════
+elif page == "🤖 AI Insights":
+    if not is_admin: st.error("Admin only."); st.stop()
+
+    st.title("🤖 AI Insights")
+    with st.expander("ℹ️ About this report", expanded=False):
+        st.markdown("""
+**What this report does:** Surfaces the most important signals buried in your ERP data — things that need your attention *today*, not after you've dug through reports manually.
+
+**Sections:**
+- 🚨 **Action Summary** — headline counts of every alert type
+- 📦 **Reorder Alerts** — products where stock will run out in <30 days at current sales pace
+- 💀 **Dead Stock** — products with stock but zero sales in 60/90/120 days (capital trapped)
+- 📉 **Margin Erosion** — bills where profit % fell >10 pts below that product's own 90-day average
+- ⚠️ **Churn Early Warning** — customers overdue vs their own historical buying gap
+- 🏆 **Product Rationalisation** — SKUs with low margin + low velocity + high stock: discontinue or discount
+- 💰 **Gross Profit Bridge** — why this month's GP differs from last month (volume vs mix vs rate)
+- 📈 **Supplier Cost Drift** — products where your purchase cost has risen over time
+- 🔗 **Product Affinity** — which products are most often bought together in the same bill
+        """)
+
+    st.divider()
+
+    # ── Shared base datasets ─────────────────────────────────────────────────
+    _today    = pd.Timestamp(df['Date'].max())
+    _sales    = df[df['Type'] == 'S'].copy()
+    _purch    = df[df['Type'].isin(['P','O.S'])].copy()
+    _wac_map  = st.session_state.get('supplier_wac_map', {})
+
+    # Current stock: last Closing value per product
+    _stock_df = (df.sort_values('Date')
+                   .groupby('Product No.')['Closing']
+                   .last()
+                   .reset_index()
+                   .rename(columns={'Closing': 'Stock (Sq.m)'}))
+    _stock_df = _stock_df[_stock_df['Stock (Sq.m)'] > 0]
+
+    # 90-day sales velocity per product (sq.m / day)
+    _win90    = _sales[_sales['Date'] >= _today - pd.Timedelta(days=90)]
+    _vel      = (_win90.groupby('Product No.')['Sq.m'].sum() / 90).reset_index()
+    _vel.columns = ['Product No.', 'Daily Sqm']
+
+    # Merge stock + velocity
+    _sv = _stock_df.merge(_vel, on='Product No.', how='left')
+    _sv['Daily Sqm'] = _sv['Daily Sqm'].fillna(0)
+    _sv['Days of Stock'] = (_sv['Stock (Sq.m)'] / _sv['Daily Sqm'].replace(0, None)).round(1)
+
+    # Add size/brand from prod
+    if not prod.empty:
+        _sv = _sv.merge(prod[['Product No.','Brand Name','Category','Size']].drop_duplicates('Product No.'),
+                        on='Product No.', how='left')
+
+    # ── REORDER ALERTS ───────────────────────────────────────────────────────
+    _reorder_days = 30
+    _reorder = _sv[(_sv['Daily Sqm'] > 0) & (_sv['Days of Stock'] < _reorder_days)].copy()
+    _reorder = _reorder.sort_values('Days of Stock')
+    _reorder['Cost (Rs)'] = _reorder.apply(
+        lambda r: round(r['Stock (Sq.m)'] * _wac_map.get(str(r['Product No.']).upper(), 0), 0)
+        if _wac_map else None, axis=1)
+
+    # ── DEAD STOCK ───────────────────────────────────────────────────────────
+    _sold_60  = set(_sales[_sales['Date'] >= _today - pd.Timedelta(days=60)]['Product No.'].unique())
+    _sold_90  = set(_sales[_sales['Date'] >= _today - pd.Timedelta(days=90)]['Product No.'].unique())
+    _sold_120 = set(_sales[_sales['Date'] >= _today - pd.Timedelta(days=120)]['Product No.'].unique())
+    _dead = _sv[_sv['Daily Sqm'] == 0].copy()
+    _dead['Last Sale'] = _dead['Product No.'].map(
+        _sales.groupby('Product No.')['Date'].max().dt.strftime('%d-%b-%Y'))
+    _dead['Dead Since'] = _dead['Product No.'].apply(
+        lambda p: '120+ days' if p not in _sold_120 else
+                  ('90+ days' if p not in _sold_90 else
+                  ('60+ days' if p not in _sold_60 else '<60 days')))
+    _dead['Capital Trapped (Rs)'] = _dead.apply(
+        lambda r: round(r['Stock (Sq.m)'] * _wac_map.get(str(r['Product No.']).upper(), 0), 0)
+        if _wac_map else None, axis=1)
+    _dead = _dead.sort_values('Stock (Sq.m)', ascending=False)
+
+    # ── MARGIN EROSION ───────────────────────────────────────────────────────
+    _s90 = _sales[_sales['Date'] >= _today - pd.Timedelta(days=90)].copy()
+    _s90['Profit%'] = (_s90['Profit'] / _s90['SALE'].replace(0, None) * 100).round(2)
+    _prod_avg_margin = _s90.groupby('Product No.')['Profit%'].mean().to_dict()
+
+    _sales2 = _sales.copy()
+    _sales2['Profit%'] = (_sales2['Profit'] / _sales2['SALE'].replace(0, None) * 100).round(2)
+    _sales2['Avg Margin%'] = _sales2['Product No.'].map(_prod_avg_margin)
+    _sales2['Margin Drop'] = _sales2['Avg Margin%'] - _sales2['Profit%']
+    _eroded = _sales2[
+        (_sales2['Date'] >= _today - pd.Timedelta(days=30)) &
+        (_sales2['Margin Drop'] > 10) &
+        (_sales2['SALE'] > 0)
+    ][['Date','Bill No.','Account Name','Product No.','SALE','Profit%','Avg Margin%','Margin Drop']].copy()
+    _eroded = _eroded.sort_values('Margin Drop', ascending=False)
+    _eroded['Date'] = pd.to_datetime(_eroded['Date']).dt.strftime('%d-%b-%Y')
+    _eroded['SALE'] = _eroded['SALE'].apply(lambda x: f"Rs {x:,.0f}")
+
+    # ── CHURN EARLY WARNING ──────────────────────────────────────────────────
+    _cust_sales = _sales.groupby('Account Name').agg(
+        Bills     = ('Bill No.', 'nunique'),
+        First     = ('Date', 'min'),
+        Last      = ('Date', 'max'),
+        Revenue   = ('SALE', 'sum'),
+    ).reset_index()
+    _cust_sales['Tenure Days']    = (_today - _cust_sales['First']).dt.days
+    _cust_sales['Days Since Last'] = (_today - _cust_sales['Last']).dt.days
+    _cust_sales['Avg Gap']        = (_cust_sales['Tenure Days'] / _cust_sales['Bills'].clip(lower=1)).round(0)
+    _cust_sales['Overdue Ratio']  = (_cust_sales['Days Since Last'] / _cust_sales['Avg Gap'].replace(0, None)).round(2)
+    _churn_warn = _cust_sales[
+        (_cust_sales['Bills'] >= 3) &
+        (_cust_sales['Overdue Ratio'] >= 1.5) &
+        (_cust_sales['Days Since Last'] >= 20)
+    ].copy()
+    _churn_warn = _churn_warn.sort_values('Overdue Ratio', ascending=False)
+    _churn_warn['Risk'] = _churn_warn['Overdue Ratio'].apply(
+        lambda x: '🔴 Critical' if x >= 3 else ('🟠 High' if x >= 2 else '🟡 Medium'))
+    _churn_warn['Last Purchase'] = _churn_warn['Last'].dt.strftime('%d-%b-%Y')
+    _churn_warn['Revenue'] = _churn_warn['Revenue'].apply(lambda x: f"Rs {x:,.0f}")
+    _churn_warn['Avg Gap'] = _churn_warn['Avg Gap'].astype(int).astype(str) + ' days'
+    _churn_warn['Days Since Last'] = _churn_warn['Days Since Last'].astype(int)
+
+    # ── PRODUCT RATIONALISATION ──────────────────────────────────────────────
+    _rat = _sv.merge(
+        _s90.groupby('Product No.').agg(
+            Sales90   = ('SALE', 'sum'),
+            Margin90  = ('Profit%', 'mean'),
+        ).reset_index(), on='Product No.', how='left')
+    _rat['Sales90']  = _rat['Sales90'].fillna(0)
+    _rat['Margin90'] = _rat['Margin90'].fillna(0)
+    # Rank: high stock rank + low sales rank + low margin rank → high rationalisation score
+    _rat['StockRank']  = _rat['Stock (Sq.m)'].rank(pct=True) * 100
+    _rat['SalesRank']  = (100 - _rat['Sales90'].rank(pct=True) * 100)   # inverted
+    _rat['MarginRank'] = (100 - _rat['Margin90'].rank(pct=True) * 100)  # inverted
+    _rat['Rationalise Score'] = (_rat['StockRank']*0.4 + _rat['SalesRank']*0.35 + _rat['MarginRank']*0.25).round(1)
+    _rat = _rat[_rat['Stock (Sq.m)'] > 0].sort_values('Rationalise Score', ascending=False).head(30)
+    _rat['Capital (Rs)'] = _rat.apply(
+        lambda r: round(r['Stock (Sq.m)'] * _wac_map.get(str(r['Product No.']).upper(), 0), 0)
+        if _wac_map else None, axis=1)
+    _rat['Recommendation'] = _rat['Rationalise Score'].apply(
+        lambda x: '🔴 Discontinue / Deep Discount' if x >= 80 else
+                  ('🟠 Reduce Orders' if x >= 60 else '🟡 Monitor'))
+
+    # ── GROSS PROFIT BRIDGE ──────────────────────────────────────────────────
+    _this_m  = _today.to_period('M')
+    _prev_m  = (_today - pd.DateOffset(months=1)).to_period('M')
+    _s_m = _sales.copy()
+    _s_m['Month'] = _s_m['Date'].dt.to_period('M')
+    _gp_cur  = _s_m[_s_m['Month'] == _this_m]
+    _gp_prv  = _s_m[_s_m['Month'] == _prev_m]
+
+    def _gp_summary(d):
+        return {
+            'Revenue': d['SALE'].sum(),
+            'GP': d['Profit'].sum(),
+            'Sqm': d['Sq.m'].sum(),
+            'GP%': (d['Profit'].sum() / d['SALE'].sum() * 100) if d['SALE'].sum() > 0 else 0,
+        }
+    _cur_s = _gp_summary(_gp_cur)
+    _prv_s = _gp_summary(_gp_prv)
+
+    _vol_effect  = (_cur_s['Sqm'] - _prv_s['Sqm']) * (_prv_s['GP'] / _prv_s['Sqm'] if _prv_s['Sqm'] > 0 else 0)
+    _mix_rev_diff= _cur_s['Revenue'] - _prv_s['Revenue'] - (_cur_s['Sqm'] - _prv_s['Sqm']) * (_prv_s['Revenue'] / _prv_s['Sqm'] if _prv_s['Sqm'] > 0 else 0)
+    _rate_effect = _cur_s['GP'] - _prv_s['GP'] - _vol_effect
+    _gp_bridge = pd.DataFrame([
+        {'Component': f"GP — {str(_prev_m)}",  'Amount (Rs)': round(_prv_s['GP'], 0)},
+        {'Component': '➕ Volume Effect',        'Amount (Rs)': round(_vol_effect, 0)},
+        {'Component': '➕ Rate / Margin Effect', 'Amount (Rs)': round(_rate_effect, 0)},
+        {'Component': f"= GP — {str(_this_m)}", 'Amount (Rs)': round(_cur_s['GP'], 0)},
+    ])
+
+    # ── SUPPLIER COST DRIFT ──────────────────────────────────────────────────
+    _sup_log = st.session_state.get('supplier_wac', {})
+    _drift_rows = []
+    _sup_batches = st.session_state.get('supplier_log', [])
+    # Use purchase data to estimate cost drift: compare avg purchase rate last 90d vs prior 90d
+    _p_cost = _purch[['Date','Product No.','Rate','Sq.m']].copy()
+    _p_cost['Date'] = pd.to_datetime(_p_cost['Date'])
+    _p_cost = _p_cost[_p_cost['Rate'] > 0]
+    _cut = _today - pd.Timedelta(days=90)
+    _cut2 = _today - pd.Timedelta(days=180)
+    def _wac_period(d, start, end):
+        s = d[(d['Date'] >= start) & (d['Date'] < end)]
+        if s.empty: return None
+        tv = (s['Sq.m'] * s['Rate']).sum()
+        tq = s['Sq.m'].sum()
+        return round(tv/tq, 2) if tq > 0 else None
+    for pno, grp in _p_cost.groupby('Product No.'):
+        c_now  = _wac_period(grp, _cut,  _today)
+        c_prev = _wac_period(grp, _cut2, _cut)
+        if c_now and c_prev and c_prev > 0:
+            drift_pct = round((c_now - c_prev) / c_prev * 100, 1)
+            if abs(drift_pct) >= 3:
+                _drift_rows.append({'Product No.': pno,
+                                    'Cost 90d Ago': c_prev,
+                                    'Cost Now': c_now,
+                                    'Drift %': drift_pct})
+    _drift_df = pd.DataFrame(_drift_rows).sort_values('Drift %', ascending=False) if _drift_rows else pd.DataFrame()
+    if not _drift_df.empty and not prod.empty:
+        _drift_df = _drift_df.merge(prod[['Product No.','Brand Name','Size']].drop_duplicates('Product No.'),
+                                     on='Product No.', how='left')
+
+    # ── PRODUCT AFFINITY ─────────────────────────────────────────────────────
+    _bill_prods = _sales.groupby('Bill No.')['Product No.'].apply(list)
+    _aff_rows = {}
+    for prods in _bill_prods:
+        prods = list(set(prods))
+        for i, a in enumerate(prods):
+            for b in prods[i+1:]:
+                key = tuple(sorted([a, b]))
+                _aff_rows[key] = _aff_rows.get(key, 0) + 1
+    _aff_df = pd.DataFrame(
+        [{'Product A': k[0], 'Product B': k[1], 'Co-Purchases': v}
+         for k, v in _aff_rows.items()]
+    ).sort_values('Co-Purchases', ascending=False).head(30) if _aff_rows else pd.DataFrame()
+
+    # ════════════════════════════════════════════════════════════════════
+    # RENDER
+    # ════════════════════════════════════════════════════════════════════
+
+    # ── Action Summary Strip ─────────────────────────────────────────────────
+    st.subheader("🚨 Action Summary")
+    ac1,ac2,ac3,ac4,ac5,ac6 = st.columns(6)
+    ac1.metric("📦 Reorder Now",      f"{len(_reorder):,}",
+               help="Products with <30 days of stock at current pace")
+    ac2.metric("💀 Dead Stock SKUs",  f"{len(_dead):,}",
+               help="Products with stock but zero sales in 60+ days")
+    ac3.metric("📉 Margin Alerts",    f"{len(_eroded):,}",
+               help="Bills in last 30 days with margin >10 pts below product average")
+    ac4.metric("⚠️ Churn Risk",       f"{len(_churn_warn):,}",
+               help="Customers overdue vs their own buying cadence")
+    ac5.metric("🏚️ Rationalise",     f"{len(_rat[_rat['Rationalise Score']>=60]):,}",
+               help="SKUs flagged for reduction/discontinuation")
+    ac6.metric("📈 Cost Drift SKUs",  f"{len(_drift_df):,}" if not _drift_df.empty else "—",
+               help="Products where purchase cost changed >3% vs prior 90 days")
+
+    st.divider()
+
+    # ── TABS ─────────────────────────────────────────────────────────────────
+    _tabs = st.tabs([
+        "📦 Reorder Alerts",
+        "💀 Dead Stock",
+        "📉 Margin Erosion",
+        "⚠️ Churn Warning",
+        "🏆 Rationalisation",
+        "💰 GP Bridge",
+        "📈 Cost Drift",
+        "🔗 Affinity",
+    ])
+
+    # ── TAB 1: REORDER ───────────────────────────────────────────────────────
+    with _tabs[0]:
+        st.subheader(f"📦 Reorder Alerts — {len(_reorder):,} products below {_reorder_days} days")
+        _rd_thresh = st.slider("Days of stock threshold", 7, 60, 30, key="rd_thresh")
+        _reorder_f = _sv[(_sv['Daily Sqm'] > 0) & (_sv['Days of Stock'] < _rd_thresh)].copy()
+        _reorder_f = _reorder_f.sort_values('Days of Stock')
+        _reorder_f['Cost (Rs)'] = _reorder_f.apply(
+            lambda r: round(r['Stock (Sq.m)'] * _wac_map.get(str(r['Product No.']).upper(), 0), 0)
+            if _wac_map else None, axis=1)
+        _r_disp_cols = [c for c in ['Product No.','Brand Name','Category','Size',
+                                     'Stock (Sq.m)','Daily Sqm','Days of Stock','Cost (Rs)']
+                        if c in _reorder_f.columns]
+        st.dataframe(_reorder_f[_r_disp_cols].reset_index(drop=True),
+                     hide_index=True, use_container_width=True)
+        if not _reorder_f.empty:
+            st.download_button("📥 Download Reorder List",
+                               _reorder_f[_r_disp_cols].to_csv(index=False),
+                               "reorder_alerts.csv", key="dl_reorder")
+
+    # ── TAB 2: DEAD STOCK ────────────────────────────────────────────────────
+    with _tabs[1]:
+        st.subheader(f"💀 Dead Stock — {len(_dead):,} SKUs with stock but no recent sales")
+        _ds_filter = st.selectbox("Show items dead for at least",
+                                   ["60+ days","90+ days","120+ days"], key="ds_filt")
+        _ds_min = int(_ds_filter.replace('+ days',''))
+        _dead_f = _dead[_dead['Product No.'].apply(
+            lambda p: p not in (_sold_60 if _ds_min==60 else _sold_90 if _ds_min==90 else _sold_120)
+        )].copy()
+
+        _cap_total = _dead_f['Capital Trapped (Rs)'].sum() if 'Capital Trapped (Rs)' in _dead_f.columns else 0
+        dc1, dc2 = st.columns(2)
+        dc1.metric("Dead SKUs",           f"{len(_dead_f):,}")
+        dc2.metric("Capital Trapped",     f"Rs {_cap_total:,.0f}" if _cap_total else "N/A (no cost data)")
+
+        _d_disp_cols = [c for c in ['Product No.','Brand Name','Size','Stock (Sq.m)',
+                                     'Last Sale','Dead Since','Capital Trapped (Rs)']
+                        if c in _dead_f.columns]
+        st.dataframe(_dead_f[_d_disp_cols].reset_index(drop=True),
+                     hide_index=True, use_container_width=True)
+        if not _dead_f.empty:
+            st.download_button("📥 Download Dead Stock",
+                               _dead_f[_d_disp_cols].to_csv(index=False),
+                               "dead_stock.csv", key="dl_dead")
+
+    # ── TAB 3: MARGIN EROSION ────────────────────────────────────────────────
+    with _tabs[2]:
+        st.subheader(f"📉 Margin Erosion — {len(_eroded):,} bills in last 30 days with margin drop >10 pts")
+        _me_thresh = st.slider("Margin drop threshold (pts)", 5, 30, 10, key="me_thresh")
+        _eroded2 = _sales2[
+            (_sales2['Date'] >= _today - pd.Timedelta(days=30)) &
+            (_sales2['Margin Drop'] > _me_thresh) &
+            (_sales2['SALE'] > 0)
+        ][['Date','Bill No.','Account Name','Product No.','SALE','Profit%','Avg Margin%','Margin Drop']].copy()
+        _eroded2 = _eroded2.sort_values('Margin Drop', ascending=False)
+        _eroded2['Date'] = pd.to_datetime(_eroded2['Date']).dt.strftime('%d-%b-%Y')
+        _eroded2['SALE'] = _eroded2['SALE'].apply(lambda x: f"Rs {x:,.0f}")
+        _eroded2['Profit%'] = _eroded2['Profit%'].round(1)
+        _eroded2['Avg Margin%'] = _eroded2['Avg Margin%'].round(1)
+        _eroded2['Margin Drop'] = _eroded2['Margin Drop'].round(1)
+        st.dataframe(_eroded2.reset_index(drop=True), hide_index=True, use_container_width=True)
+
+    # ── TAB 4: CHURN WARNING ─────────────────────────────────────────────────
+    with _tabs[3]:
+        st.subheader(f"⚠️ Churn Early Warning — {len(_churn_warn):,} customers overdue")
+        _cr1,_cr2,_cr3 = st.columns(3)
+        _crit = _churn_warn[_churn_warn['Risk']=='🔴 Critical']
+        _high = _churn_warn[_churn_warn['Risk']=='🟠 High']
+        _med  = _churn_warn[_churn_warn['Risk']=='🟡 Medium']
+        _cr1.metric("🔴 Critical", f"{len(_crit):,}")
+        _cr2.metric("🟠 High",     f"{len(_high):,}")
+        _cr3.metric("🟡 Medium",   f"{len(_med):,}")
+
+        _cw_cols = ['Risk','Account Name','Days Since Last','Last Purchase','Avg Gap','Bills','Revenue','Overdue Ratio']
+        _cw_cols = [c for c in _cw_cols if c in _churn_warn.columns]
+        st.dataframe(_churn_warn[_cw_cols].reset_index(drop=True),
+                     hide_index=True, use_container_width=True)
+        if not _churn_warn.empty:
+            st.download_button("📥 Download Churn List",
+                               _churn_warn[_cw_cols].to_csv(index=False),
+                               "churn_warning.csv", key="dl_churn")
+
+    # ── TAB 5: RATIONALISATION ───────────────────────────────────────────────
+    with _tabs[4]:
+        st.subheader("🏆 Product Rationalisation — SKUs to discontinue, discount, or monitor")
+        st.caption("Score = 40% Stock Weight + 35% Low Sales Weight + 25% Low Margin Weight. Higher = more urgent to rationalise.")
+        _rat_disp = _rat[['Product No.','Brand Name','Size','Stock (Sq.m)',
+                           'Sales90','Margin90','Rationalise Score','Capital (Rs)','Recommendation']].copy()
+        _rat_disp = _rat_disp.rename(columns={'Sales90':'90d Sales (Rs)','Margin90':'90d Margin%'})
+        _rat_disp['90d Margin%'] = _rat_disp['90d Margin%'].round(1)
+        _rat_disp['Rationalise Score'] = _rat_disp['Rationalise Score'].round(1)
+        st.dataframe(_rat_disp.reset_index(drop=True), hide_index=True, use_container_width=True)
+        if not _rat_disp.empty:
+            st.download_button("📥 Download Rationalisation List",
+                               _rat_disp.to_csv(index=False),
+                               "rationalisation.csv", key="dl_rat")
+
+    # ── TAB 6: GP BRIDGE ─────────────────────────────────────────────────────
+    with _tabs[5]:
+        st.subheader(f"💰 Gross Profit Bridge — {str(_prev_m)} → {str(_this_m)}")
+        gb1,gb2,gb3,gb4 = st.columns(4)
+        gb1.metric(f"Revenue {str(_prev_m)}", f"Rs {_prv_s['Revenue']:,.0f}")
+        gb2.metric(f"Revenue {str(_this_m)}", f"Rs {_cur_s['Revenue']:,.0f}",
+                   delta=f"Rs {_cur_s['Revenue']-_prv_s['Revenue']:,.0f}")
+        gb3.metric(f"GP {str(_prev_m)}", f"Rs {_prv_s['GP']:,.0f}")
+        gb4.metric(f"GP {str(_this_m)}", f"Rs {_cur_s['GP']:,.0f}",
+                   delta=f"Rs {_cur_s['GP']-_prv_s['GP']:,.0f}")
+        st.divider()
+        st.markdown("**GP Change Breakdown:**")
+        for _, row in _gp_bridge.iterrows():
+            sign = "+" if row['Amount (Rs)'] >= 0 else ""
+            if '=' in row['Component']:
+                st.markdown(f"**{row['Component']}** → **Rs {row['Amount (Rs)']:,.0f}** ({sign}{(_cur_s['GP%']):.1f}% margin)")
+            else:
+                st.markdown(f"{row['Component']} → Rs {sign}{row['Amount (Rs)']:,.0f}")
+
+        st.divider()
+        st.caption("Volume Effect = change in sq.m sold × prior rate. Rate/Margin Effect = residual change.")
+
+        # Monthly GP trend
+        _monthly_gp = (_s_m[_s_m['Type']=='S'].groupby('Month')
+                         .agg(GP=('Profit','sum'), Revenue=('SALE','sum'))
+                         .reset_index())
+        _monthly_gp['Month'] = _monthly_gp['Month'].astype(str)
+        _monthly_gp['GP%'] = (_monthly_gp['GP'] / _monthly_gp['Revenue'].replace(0,None)*100).round(1)
+        st.subheader("Monthly GP Trend")
+        st.dataframe(_monthly_gp.tail(12).sort_values('Month', ascending=False).reset_index(drop=True),
+                     hide_index=True, use_container_width=True)
+
+    # ── TAB 7: COST DRIFT ────────────────────────────────────────────────────
+    with _tabs[6]:
+        st.subheader(f"📈 Supplier Cost Drift — products where purchase cost changed >3% in last 90 days")
+        if _drift_df.empty:
+            st.success("✅ No significant cost drift detected across your purchase history.")
+        else:
+            _up   = _drift_df[_drift_df['Drift %'] > 0]
+            _down = _drift_df[_drift_df['Drift %'] < 0]
+            sd1, sd2 = st.columns(2)
+            sd1.metric("📈 Cost Increases", f"{len(_up):,} SKUs",
+                       help="Purchase cost higher now vs 90 days ago")
+            sd2.metric("📉 Cost Decreases", f"{len(_down):,} SKUs",
+                       help="Purchase cost lower now vs 90 days ago")
+            _d_cols = [c for c in ['Product No.','Brand Name','Size',
+                                    'Cost 90d Ago','Cost Now','Drift %'] if c in _drift_df.columns]
+            st.dataframe(_drift_df[_d_cols].reset_index(drop=True),
+                         hide_index=True, use_container_width=True)
+            st.download_button("📥 Download Cost Drift",
+                               _drift_df[_d_cols].to_csv(index=False),
+                               "cost_drift.csv", key="dl_drift")
+
+    # ── TAB 8: AFFINITY ──────────────────────────────────────────────────────
+    with _tabs[7]:
+        st.subheader("🔗 Product Affinity — most frequently co-purchased pairs")
+        st.caption("Products appearing together in the same bill. Use for bundling, cross-selling, and shelf placement.")
+        if _aff_df.empty:
+            st.info("Not enough multi-product bills to build affinity data.")
+        else:
+            _aff_min = st.slider("Minimum co-purchases", 1, 20, 3, key="aff_min")
+            _aff_show = _aff_df[_aff_df['Co-Purchases'] >= _aff_min].reset_index(drop=True)
+            st.dataframe(_aff_show, hide_index=True, use_container_width=True)
+            if not _aff_show.empty:
+                st.download_button("📥 Download Affinity Data",
+                                   _aff_show.to_csv(index=False),
+                                   "product_affinity.csv", key="dl_aff")
