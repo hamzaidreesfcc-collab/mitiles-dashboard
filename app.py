@@ -252,7 +252,6 @@ def _extract_family(p):
             return result
     return p
 
-@st.cache_data(ttl=3600)
 def _get_qualifier(name: str) -> str:
     n = name.upper()
     if 'AAA' in n: return 'AAA'
@@ -264,6 +263,7 @@ def _extract_code(name: str) -> str:
     parts = name.strip().split()
     return parts[0] if parts else name
 
+@st.cache_data(ttl=1800, show_spinner=False)
 def load_data(path):
     import io
     import requests
@@ -5913,9 +5913,12 @@ elif page == "📋 Sales & Profit Report":
         st.download_button("📥 Download CSV", _raw.to_csv(index=False), "salesman_report.csv", "text/csv")
 
 
+
 # ─────────────────────────────────────────────────────────────────────────────
 # LABOUR COSTS PAGE
-# Track daily loading / unloading expenses by size and box rate
+# Auto-calculates from Purchase rows (Type='P') in ERP data.
+# User configures rate per box by size (with effective date).
+# Boxes = Sq.m / (Sq.m/Box) from PRODUCT DATA.
 # ─────────────────────────────────────────────────────────────────────────────
 elif page == "🚛 Labour Costs":
     if not is_admin: st.error("Admin only."); st.stop()
@@ -5923,158 +5926,218 @@ elif page == "🚛 Labour Costs":
     st.title("🚛 Labour Costs")
     with st.expander("ℹ️ About this report", expanded=False):
         st.markdown("""
-**What it tracks:** Daily loading and unloading labour costs, broken down by tile size and box count.
+**What it tracks:** Daily loading and unloading labour costs, auto-calculated from actual purchase receipts in the ERP.
 
-**How to use:**
-- Select the date and expense type (Loading / Unloading / Both)
-- Choose the size category (e.g. 40×40, 60×60, 60×120…)
-- Enter the number of boxes and the rate per box
-- Click **Add Entry** — the total is calculated automatically (Boxes × Rate)
-- **Example:** 1,000 boxes of 40×40 at Rs 8/box = Rs 8,000 for that day
-- Download all entries as CSV at any time for your accounts
+**How it works:**
+1. Every Purchase row (`Type = P`) in your ERP has a Date, Product, and Sq.m received.
+2. `Sq.m ÷ Sq.m/Box` (from Product Data) = **boxes received** per line.
+3. You configure the **rate per box** by tile size, with an effective-from date.
+4. The report multiplies boxes × applicable rate = **labour cost per purchase line**.
+
+**Example:** 40×40 tiles — 200 sq.m received, Sq.m/Box = 1.28 → 156 boxes. Rate = Rs 8/box → **Rs 1,250 labour cost** for that delivery.
         """)
 
     st.divider()
 
-    # ── Session state store ──────────────────────────────────────
-    if 'labour_entries' not in st.session_state:
-        st.session_state['labour_entries'] = []
+    # ── Pull purchase data from ERP ──────────────────────────────────────────
+    _purch_df = df[df['Type'].isin(['P', 'O.S'])].copy()
+    _purch_df = _purch_df[_purch_df['Sq.m'] > 0].copy()
 
-    # ── Entry form ───────────────────────────────────────────────
-    st.subheader("➕ Log New Entry")
-    with st.form("labour_form", clear_on_submit=True):
-        fc1, fc2, fc3 = st.columns(3)
-        with fc1:
-            _lc_date  = st.date_input("Date", value=datetime.now().date(), key="lc_date")
-        with fc2:
-            _lc_type  = st.selectbox("Type", ["Unloading", "Loading", "Both"], key="lc_type")
-        with fc3:
-            _lc_shift = st.selectbox("Shift", ["Day", "Night", "Full Day"], key="lc_shift")
+    # Boxes = Sq.m / Sq.m/Box — Sq.m/Box comes from prod merge done in load_data
+    if 'Sq.m/Box' in _purch_df.columns:
+        _purch_df['Boxes'] = (_purch_df['Sq.m'] / _purch_df['Sq.m/Box'].replace(0, None)).round(2)
+    else:
+        _purch_df['Boxes'] = None
 
-        fc4, fc5, fc6, fc7 = st.columns(4)
-        with fc4:
-            _lc_size  = st.selectbox("Tile Size", [
-                "30×30", "30×60", "40×40", "60×60", "60×90",
-                "60×120", "80×80", "80×160", "120×120", "Other"
-            ], key="lc_sz")
-        with fc5:
-            _lc_cat   = st.selectbox("Category", ["P", "A", "B", "C", "D", "Other"], key="lc_cat")
-        with fc6:
-            _lc_boxes = st.number_input("No. of Boxes", min_value=1, value=1000, step=50, key="lc_boxes")
-        with fc7:
-            _lc_rate  = st.number_input("Rate / Box (Rs)", min_value=0.0, value=8.0, step=0.5, format="%.2f", key="lc_rate")
+    # ── Rate configuration ────────────────────────────────────────────────────
+    st.subheader("⚙️ Configure Rates per Box")
+    st.caption("Set the loading/unloading rate per box for each tile size. Add an effective date so historic rates are preserved.")
 
-        _lc_note = st.text_input("Notes (optional)", placeholder="e.g. Supplier delivery — Montage", key="lc_note")
+    if 'labour_rates' not in st.session_state:
+        st.session_state['labour_rates'] = []
 
-        _lc_submit = st.form_submit_button("✅ Add Entry", use_container_width=True, type="primary")
+    with st.form("rate_form", clear_on_submit=True):
+        rc1, rc2, rc3, rc4 = st.columns(4)
+        with rc1:
+            _r_type = st.selectbox("Expense Type", ["Unloading", "Loading", "Both"], key="rf_type")
+        with rc2:
+            # Derive sizes from product data if available
+            _sz_opts = sorted(_purch_df['Size'].dropna().unique().tolist()) if 'Size' in _purch_df.columns else []
+            _sz_opts = _sz_opts or ["30×30","30×60","40×40","60×60","60×90","60×120","80×80","120×120"]
+            _r_size  = st.selectbox("Tile Size", _sz_opts, key="rf_sz")
+        with rc3:
+            _r_rate  = st.number_input("Rate / Box (Rs)", min_value=0.0, value=8.0, step=0.5, format="%.2f", key="rf_rate")
+        with rc4:
+            _r_from  = st.date_input("Effective From", value=datetime.now().date(), key="rf_from")
+        _r_submit = st.form_submit_button("➕ Add Rate", use_container_width=True, type="primary")
 
-    if _lc_submit:
-        _lc_total = round(_lc_boxes * _lc_rate, 2)
-        st.session_state['labour_entries'].append({
-            'Date'      : str(_lc_date),
-            'Type'      : _lc_type,
-            'Shift'     : _lc_shift,
-            'Size'      : _lc_size,
-            'Category'  : _lc_cat,
-            'Boxes'     : int(_lc_boxes),
-            'Rate/Box'  : float(_lc_rate),
-            'Total (Rs)': _lc_total,
-            'Notes'     : _lc_note.strip(),
+    if _r_submit:
+        st.session_state['labour_rates'].append({
+            'Type': _r_type, 'Size': _r_size,
+            'Rate/Box': float(_r_rate),
+            'Effective From': str(_r_from),
         })
-        st.success(f"✅ Added: {_lc_boxes:,} boxes × Rs {_lc_rate:.2f} = **Rs {_lc_total:,.2f}**")
+        st.success(f"✅ Rate saved: {_r_size} {_r_type} → Rs {_r_rate:.2f}/box from {_r_from}")
         st.rerun()
 
-    # ── Entries table ────────────────────────────────────────────
-    st.divider()
-    _lc_entries = st.session_state.get('labour_entries', [])
+    # Show current rates
+    if st.session_state['labour_rates']:
+        _rates_df = pd.DataFrame(st.session_state['labour_rates'])
+        _rates_df['Effective From'] = pd.to_datetime(_rates_df['Effective From'])
+        st.dataframe(_rates_df.sort_values(['Size','Effective From']), hide_index=True, use_container_width=True)
 
-    if not _lc_entries:
-        st.info("No entries yet. Use the form above to log your first entry.")
+        col_clr = st.columns([4,1])[1]
+        if col_clr.button("🗑️ Clear All Rates", key="clr_rates"):
+            st.session_state['labour_rates'] = []
+            st.rerun()
     else:
-        _lc_df = pd.DataFrame(_lc_entries)
-        _lc_df['Date'] = pd.to_datetime(_lc_df['Date'])
+        st.info("No rates configured yet. Add at least one rate above to generate the report.")
+        st.stop()
 
-        # ── KPI strip ────────────────────────────────────────────
-        _lc_total_rs = _lc_df['Total (Rs)'].sum()
-        _lc_total_bx = _lc_df['Boxes'].sum()
-        _lc_days     = _lc_df['Date'].nunique()
-        _lc_avg_day  = _lc_total_rs / _lc_days if _lc_days > 0 else 0
-        _lc_avg_box  = _lc_total_rs / _lc_total_bx if _lc_total_bx > 0 else 0
+    st.divider()
 
-        k1,k2,k3,k4,k5 = st.columns(5)
-        k1.metric("Total Labour Cost", f"Rs {_lc_total_rs:,.0f}")
-        k2.metric("Total Boxes",       f"{_lc_total_bx:,}")
-        k3.metric("Days Logged",       f"{_lc_days}")
-        k4.metric("Avg Cost / Day",    f"Rs {_lc_avg_day:,.0f}")
-        k5.metric("Blended Rate/Box",  f"Rs {_lc_avg_box:.2f}")
+    # ── Build cost report ─────────────────────────────────────────────────────
+    st.subheader("📊 Labour Cost Report")
 
-        st.divider()
+    if _purch_df.empty:
+        st.warning("No purchase rows found in ERP data (Type = P).")
+        st.stop()
 
-        # ── Date filter ──────────────────────────────────────────
-        _lc_f1, _lc_f2, _lc_f3 = st.columns(3)
-        with _lc_f1:
-            _lc_ftype = st.selectbox("Filter Type", ["All"] + sorted(_lc_df['Type'].unique().tolist()), key="lc_ftype")
-        with _lc_f2:
-            _lc_fsz   = st.selectbox("Filter Size", ["All"] + sorted(_lc_df['Size'].unique().tolist()), key="lc_fsz")
-        with _lc_f3:
-            _lc_fcat  = st.selectbox("Filter Category", ["All"] + sorted(_lc_df['Category'].unique().tolist()), key="lc_fcat")
+    if 'Boxes' not in _purch_df.columns or _purch_df['Boxes'].isna().all():
+        st.warning("Sq.m/Box not available in product data — cannot calculate boxes. Ensure PRODUCT DATA sheet has a Sq.m/Box column.")
+        st.stop()
 
-        _lc_fdf = _lc_df.copy()
-        if _lc_ftype != 'All': _lc_fdf = _lc_fdf[_lc_fdf['Type']     == _lc_ftype]
-        if _lc_fsz   != 'All': _lc_fdf = _lc_fdf[_lc_fdf['Size']     == _lc_fsz]
-        if _lc_fcat  != 'All': _lc_fdf = _lc_fdf[_lc_fdf['Category'] == _lc_fcat]
+    # Build rate lookup: for each (type, size, date) → most recent applicable rate
+    _rates_df = pd.DataFrame(st.session_state['labour_rates'])
+    _rates_df['Effective From'] = pd.to_datetime(_rates_df['Effective From'])
 
-        _lc_fdf_disp = _lc_fdf.copy()
-        _lc_fdf_disp['Date'] = _lc_fdf_disp['Date'].dt.strftime('%d-%b-%Y')
+    def _get_rate(size, date, exp_type):
+        """Return the most recent rate applicable on 'date' for a given size and expense type."""
+        _r = _rates_df[
+            (_rates_df['Size'] == size) &
+            (_rates_df['Effective From'] <= pd.Timestamp(date)) &
+            (_rates_df['Type'].isin([exp_type, 'Both']))
+        ]
+        if _r.empty:
+            # Try "Both" only
+            _r = _rates_df[
+                (_rates_df['Size'] == size) &
+                (_rates_df['Effective From'] <= pd.Timestamp(date)) &
+                (_rates_df['Type'] == 'Both')
+            ]
+        if _r.empty:
+            return None
+        return float(_r.sort_values('Effective From').iloc[-1]['Rate/Box'])
 
-        st.subheader(f"📋 All Entries ({len(_lc_fdf_disp):,} rows)")
-        # Editable table — user can correct mistakes
-        _lc_edited = st.data_editor(
-            _lc_fdf_disp,
-            hide_index=True,
-            use_container_width=True,
-            num_rows="dynamic",
-            key="lc_editor"
-        )
+    # Apply rates
+    _purch_df['Date'] = pd.to_datetime(_purch_df['Date'])
+    _lc_type_filter = st.selectbox("Expense Type for Calculation", ["Unloading", "Loading"], key="lc_exp_type")
 
-        # ── Daily summary ────────────────────────────────────────
-        st.divider()
-        st.subheader("📅 Daily Summary")
-        _lc_daily = _lc_fdf.groupby('Date').agg(
-            Entries  = ('Total (Rs)', 'count'),
-            Boxes    = ('Boxes', 'sum'),
-            Total_Rs = ('Total (Rs)', 'sum'),
-        ).reset_index().sort_values('Date', ascending=False)
-        _lc_daily['Date']      = _lc_daily['Date'].dt.strftime('%d-%b-%Y')
-        _lc_daily['Total (Rs)']= _lc_daily['Total_Rs'].apply(lambda x: f"Rs {x:,.0f}")
-        _lc_daily['Boxes']     = _lc_daily['Boxes'].apply(lambda x: f"{x:,}")
-        st.dataframe(_lc_daily[['Date','Entries','Boxes','Total (Rs)']], hide_index=True, use_container_width=True)
+    _purch_df['Rate/Box'] = _purch_df.apply(
+        lambda r: _get_rate(r.get('Size'), r['Date'].date(), _lc_type_filter)
+        if pd.notna(r.get('Size')) and pd.notna(r.get('Boxes')) else None, axis=1
+    )
+    _purch_df['Labour Cost'] = _purch_df.apply(
+        lambda r: round(r['Boxes'] * r['Rate/Box'], 2)
+        if pd.notna(r.get('Boxes')) and pd.notna(r.get('Rate/Box')) else None, axis=1
+    )
 
-        # ── By Size summary ──────────────────────────────────────
-        st.divider()
-        st.subheader("📐 Summary by Size")
-        _lc_bysz = _lc_fdf.groupby('Size').agg(
-            Boxes    = ('Boxes', 'sum'),
-            Total_Rs = ('Total (Rs)', 'sum'),
-        ).reset_index().sort_values('Total_Rs', ascending=False)
-        _lc_bysz['Total (Rs)']   = _lc_bysz['Total_Rs'].apply(lambda x: f"Rs {x:,.0f}")
-        _lc_avg_rate = {}
-        for _sz, _grp in _lc_fdf.groupby('Size'):
-            _lc_avg_rate[_sz] = (_grp['Total (Rs)'].sum() / _grp['Boxes'].sum()) if _grp['Boxes'].sum() > 0 else 0
-        _lc_bysz['Avg Rate/Box'] = _lc_bysz['Size'].map(_lc_avg_rate)
-        _lc_bysz['Avg Rate/Box'] = _lc_bysz['Avg Rate/Box'].apply(lambda x: f"Rs {x:.2f}")
-        st.dataframe(_lc_bysz[['Size','Boxes','Total (Rs)','Avg Rate/Box']], hide_index=True, use_container_width=True)
+    # ── Filters ──────────────────────────────────────────────────────────────
+    ff1, ff2, ff3, ff4 = st.columns(4)
+    with ff1:
+        _lc_min_date = _purch_df['Date'].min().date()
+        _lc_max_date = _purch_df['Date'].max().date()
+        _lc_date_from = st.date_input("From Date", value=_lc_min_date, key="lc_dfrom")
+    with ff2:
+        _lc_date_to   = st.date_input("To Date",   value=_lc_max_date, key="lc_dto")
+    with ff3:
+        _sz_list = ['All'] + sorted(_purch_df['Size'].dropna().unique().tolist()) if 'Size' in _purch_df.columns else ['All']
+        _lc_sz = st.selectbox("Size", _sz_list, key="lc_filt_sz")
+    with ff4:
+        _brand_list = ['All'] + sorted(_purch_df['Brand Name'].dropna().unique().tolist()) if 'Brand Name' in _purch_df.columns else ['All']
+        _lc_brand = st.selectbox("Brand", _brand_list, key="lc_filt_brand")
 
-        # ── Download ─────────────────────────────────────────────
-        st.divider()
-        _lc_csv = _lc_fdf_disp.to_csv(index=False)
-        st.download_button("📥 Download Labour Cost CSV", _lc_csv,
-                           "labour_costs.csv", "text/csv", key="lc_dl")
+    _rep = _purch_df[
+        (_purch_df['Date'].dt.date >= _lc_date_from) &
+        (_purch_df['Date'].dt.date <= _lc_date_to)
+    ].copy()
+    if _lc_sz != 'All':    _rep = _rep[_rep['Size']        == _lc_sz]
+    if _lc_brand != 'All': _rep = _rep[_rep['Brand Name']  == _lc_brand]
 
-        # ── Delete all (with confirm) ────────────────────────────
-        st.divider()
-        with st.expander("⚠️ Clear All Entries", expanded=False):
-            st.warning("This will remove all entries from this session. Download CSV first if needed.")
-            if st.button("🗑️ Clear All Entries", key="lc_clear", type="primary"):
-                st.session_state['labour_entries'] = []
-                st.rerun()
+    _rep_costed = _rep[_rep['Labour Cost'].notna()]
+    _rep_no_rate = _rep[_rep['Labour Cost'].isna()]
+
+    # ── KPIs ────────────────────────────────────────────────────────────────
+    _total_lc   = _rep_costed['Labour Cost'].sum()
+    _total_bx   = _rep_costed['Boxes'].sum()
+    _total_sqm  = _rep_costed['Sq.m'].sum()
+    _days_cnt   = _rep_costed['Date'].dt.date.nunique()
+    _no_rate_bx = _rep_no_rate['Boxes'].sum() if not _rep_no_rate.empty and 'Boxes' in _rep_no_rate else 0
+
+    k1,k2,k3,k4,k5 = st.columns(5)
+    k1.metric("Total Labour Cost",  f"Rs {_total_lc:,.0f}")
+    k2.metric("Total Boxes",        f"{_total_bx:,.0f}")
+    k3.metric("Total Sq.m",         f"{_total_sqm:,.1f}")
+    k4.metric("Days with Purchases",f"{_days_cnt}")
+    k5.metric("⚠️ No Rate Configured", f"{len(_rep_no_rate):,} lines",
+              help="Purchase lines where no rate was found for that size+date")
+
+    st.divider()
+
+    # ── Daily Summary ─────────────────────────────────────────────────────────
+    st.subheader("📅 Daily Summary")
+    _daily = _rep_costed.groupby(_rep_costed['Date'].dt.date).agg(
+        Lines       = ('Labour Cost','count'),
+        Boxes       = ('Boxes','sum'),
+        Sq_m        = ('Sq.m','sum'),
+        Labour_Cost = ('Labour Cost','sum'),
+    ).reset_index().rename(columns={'Date':'date','Sq_m':'Sq.m','Labour_Cost':'Labour Cost (Rs)'})
+    _daily = _daily.sort_values('date', ascending=False)
+    _daily['date'] = pd.to_datetime(_daily['date']).dt.strftime('%d-%b-%Y')
+    _daily['Boxes'] = _daily['Boxes'].round(1)
+    _daily['Labour Cost (Rs)'] = _daily['Labour Cost (Rs)'].apply(lambda x: f"Rs {x:,.0f}")
+    st.dataframe(_daily, hide_index=True, use_container_width=True)
+
+    # ── By Size Summary ───────────────────────────────────────────────────────
+    st.divider()
+    st.subheader("📐 Summary by Size")
+    _bysz = _rep_costed.groupby('Size').agg(
+        Lines       = ('Labour Cost','count'),
+        Boxes       = ('Boxes','sum'),
+        Labour_Cost = ('Labour Cost','sum'),
+    ).reset_index().rename(columns={'Labour_Cost':'Labour Cost (Rs)'})
+    _bysz['Avg Rate/Box'] = (_bysz['Labour Cost (Rs)'] / _bysz['Boxes'].replace(0, None)).round(2)
+    _bysz = _bysz.sort_values('Labour Cost (Rs)', ascending=False)
+    _bysz['Labour Cost (Rs)'] = _bysz['Labour Cost (Rs)'].apply(lambda x: f"Rs {x:,.0f}")
+    _bysz['Boxes'] = _bysz['Boxes'].round(1)
+    st.dataframe(_bysz, hide_index=True, use_container_width=True)
+
+    # ── Drill-down: Full Line Detail ──────────────────────────────────────────
+    st.divider()
+    st.subheader("🔍 Drill-Down: Purchase Line Detail")
+    with st.expander("Show all purchase lines with labour cost", expanded=False):
+        _dd_cols = ['Date','Bill No.','Account Name','Product No.','Brand Name','Size',
+                    'Sq.m','Boxes','Rate/Box','Labour Cost']
+        _dd_cols = [c for c in _dd_cols if c in _rep_costed.columns]
+        _dd_show = _rep_costed[_dd_cols].copy()
+        _dd_show['Date'] = _dd_show['Date'].dt.strftime('%d-%b-%Y')
+        _dd_show = _dd_show.sort_values('Date', ascending=False)
+        st.dataframe(_dd_show, hide_index=True, use_container_width=True)
+
+    # Lines missing rates
+    if not _rep_no_rate.empty:
+        with st.expander(f"⚠️ {len(_rep_no_rate):,} lines with no rate configured", expanded=False):
+            _nr_cols = ['Date','Product No.','Size','Sq.m','Boxes']
+            _nr_cols = [c for c in _nr_cols if c in _rep_no_rate.columns]
+            _nr_show = _rep_no_rate[_nr_cols].copy()
+            _nr_show['Date'] = _nr_show['Date'].dt.strftime('%d-%b-%Y')
+            st.dataframe(_nr_show, hide_index=True, use_container_width=True)
+            st.caption("Add rates for these sizes in the configuration section above.")
+
+    # ── CSV Export ────────────────────────────────────────────────────────────
+    st.divider()
+    _export_df = _rep_costed[[c for c in ['Date','Bill No.','Account Name','Product No.',
+        'Size','Sq.m','Boxes','Rate/Box','Labour Cost'] if c in _rep_costed.columns]].copy()
+    _export_df['Date'] = _export_df['Date'].dt.strftime('%Y-%m-%d')
+    st.download_button("📥 Download Labour Cost CSV", _export_df.to_csv(index=False),
+                       "labour_costs.csv", "text/csv", key="lc_dl")
