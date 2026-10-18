@@ -478,35 +478,31 @@ def load_data(path):
             except Exception as ex:
                 supplier_log.append((cost_override_id, 'COST_OVERRIDES', 0, str(ex)[:100]))
 
-        # ── Fuzzy matching for unmatched products ─────────────
-        # Products in ERP not in supplier_wac — try name similarity
+        # ── Qualifier-scoped averaging for unmatched ERP products ──
         epr_products = set(df['Product No.'].str.upper().unique())
         matched_products = set(supplier_wac.keys())
         unmatched = epr_products - matched_products
 
         if unmatched and supplier_wac:
-            from difflib import SequenceMatcher
-            matched_list = list(matched_products)
-            for pno in list(unmatched)[:2000]:  # cap for performance
-                best_ratio = 0.0
-                best_match = None
-                for cand in matched_list:
-                    r = SequenceMatcher(None, pno, cand).ratio()
-                    if r > best_ratio:
-                        best_ratio = r
-                        best_match = cand
-                # Only fuzzy-match if first word (brand/code) matches too
-                pno_word0 = pno.split()[0] if pno.split() else pno
-                match_word0 = best_match.split()[0] if best_match and best_match.split() else ''
-                same_code = (pno_word0 == match_word0)
-                # If they share the same numeric/product code, they are variants —
-                # never fuzzy-assign cost between variants (e.g. TONE H2 vs COMM).
-                # Only fuzzy-match across genuinely different names (different code prefix).
-                if best_ratio >= 0.92 and best_match and not same_code:
-                    supplier_wac[pno] = {**supplier_wac[best_match],
-                                         'fuzzy_of': best_match,
-                                         'confidence': round(best_ratio*100, 1)}
-                    supplier_match[pno] = f'fuzzy({best_ratio*100:.0f}%)'
+            _code_qual_idx = {}
+            for sk, sv in supplier_wac.items():
+                _sc = _extract_code(sk); _sq = _get_qualifier(sk)
+                _bt = sv.get('batches', [])
+                _tq = sum(b[0] for b in _bt); _tv = sum(b[0]*b[1] for b in _bt)
+                _code_qual_idx.setdefault(_sc, {}).setdefault(_sq, []).append(
+                    (sk, _tq, _tv, sv.get('supplier', '')))
+            for pno in list(unmatched):
+                _pc = _extract_code(pno); _pq = _get_qualifier(pno)
+                _pool = _code_qual_idx.get(_pc, {}).get(_pq, [])
+                if not _pool: continue
+                _pool_qty = sum(e[1] for e in _pool)
+                _pool_val = sum(e[2] for e in _pool)
+                if _pool_qty <= 0: continue
+                _avg_cost = round(_pool_val / _pool_qty, 2)
+                _n = len(_pool)
+                supplier_wac[pno] = {'batches': [(_pool_qty, _avg_cost)],
+                    'supplier': _pool[0][3], 'avg_of': [e[0] for e in _pool], 'n_variants': _n}
+                supplier_match[pno] = 'Averaging(' + str(_n) + ')'
 
         # Store log for Supplier Costs page
         st.session_state['supplier_log'] = supplier_log
@@ -521,14 +517,27 @@ def load_data(path):
     for pno, v in supplier_wac.items():
         batches = v.get('batches', [])
         if batches:
-            # FIFO: oldest batch (index 0) is the cost we'd use first
-            fifo_cost = batches[0][1]   # (qty, cost)[1]
+            fifo_cost = batches[0][1]
+            _m = supplier_match.get(pno, 'exact')
+            if _m == 'exact': _m = 'FIFO' if len(batches) > 1 else 'WAC'
             supplier_wac_map[pno]    = round(fifo_cost, 2)
-            supplier_source_map[pno] = supplier_match.get(pno, 'exact')
+            supplier_source_map[pno] = _m
 
     if supplier_wac_map:
         st.session_state['supplier_wac_map']    = supplier_wac_map
         st.session_state['supplier_source_map'] = supplier_source_map
+
+    
+def _get_qualifier(name: str) -> str:
+    n = name.upper()
+    if 'AAA' in n: return 'AAA'
+    if 'COMM' in n: return 'COMM'
+    if 'STD' in n: return 'STD'
+    return ''
+
+def _extract_code(name: str) -> str:
+    parts = name.strip().split()
+    return parts[0] if parts else name
 
     def ap(row):
         pno = str(row.get('Product No.','')).upper()
@@ -1058,14 +1067,37 @@ if 'supplier_wac_map' not in st.session_state:
         else:
             _supplier_log.append(('—', '—', 0, 'SUPPLIER_FILE_IDS secret is empty'))
 
+        # ── Qualifier-scoped averaging (standalone path) ──
+        _erp_prods2 = set(df['Product No.'].str.upper().unique()) if 'Product No.' in df.columns else set()
+        _unmatched2 = _erp_prods2 - set(_supplier_wac.keys())
+        if _unmatched2 and _supplier_wac:
+            _cidx2 = {}
+            for _sk2, _sv2 in _supplier_wac.items():
+                _sc2 = _extract_code(_sk2); _sq2 = _get_qualifier(_sk2)
+                _bt2 = _sv2.get('batches', [])
+                _tq2 = sum(b[0] for b in _bt2); _tv2 = sum(b[0]*b[1] for b in _bt2)
+                _cidx2.setdefault(_sc2, {}).setdefault(_sq2, []).append(
+                    (_sk2, _tq2, _tv2, _sv2.get('supplier', '')))
+            for _pno2 in list(_unmatched2):
+                _pc2 = _extract_code(_pno2); _pq2 = _get_qualifier(_pno2)
+                _pool2 = _cidx2.get(_pc2, {}).get(_pq2, [])
+                if not _pool2: continue
+                _pq2t = sum(e[1] for e in _pool2); _pv2 = sum(e[2] for e in _pool2)
+                if _pq2t <= 0: continue
+                _n2 = len(_pool2)
+                _supplier_wac[_pno2] = {'batches': [(round(_pq2t,4), round(_pv2/_pq2t,2))],
+                    'supplier': _pool2[0][3], 'avg_of': [e[0] for e in _pool2], 'n_variants': _n2}
+                _supplier_match[_pno2] = 'Averaging(' + str(_n2) + ')'
+
         st.session_state['supplier_log'] = _supplier_log
         _wac_map = {}; _src_map = {}
         for _pno, _v in _supplier_wac.items():
             _batches = _v.get('batches', [])
             if _batches:
-                # FIFO: oldest batch (index 0) is used first
+                _m2 = _supplier_match.get(_pno, 'exact')
+                if _m2 == 'exact': _m2 = 'FIFO' if len(_batches) > 1 else 'WAC'
                 _wac_map[_pno] = round(_batches[0][1], 2)
-                _src_map[_pno] = _supplier_match.get(_pno, 'exact')
+                _src_map[_pno] = _m2
         if _wac_map:
             st.session_state['supplier_wac_map']    = _wac_map
             st.session_state['supplier_source_map'] = _src_map
@@ -1095,6 +1127,7 @@ with st.sidebar:
         "📊 Salesman Rate Analysis","🤖 ML Model Health",
         "🎨 Design Brief Tool","🔍 Product Audit","💡 Investment Advisor","📋 Audit Log","💰 Supplier Costs","📖 Formula Guide","⚙️ Metrics Config","⚔️ Product Showdown","👻 Ghost Performers","🟣 Tail Stock",
         "📋 Sales & Profit Report",
+        "🚛 Labour Costs",
     ]
     _role = st.session_state.get('role','viewer')
     _allowed = _all_pages if ROLE_PAGES.get(_role)=="all" else ROLE_PAGES.get(_role, _all_pages[:3])
@@ -4265,16 +4298,16 @@ Your supplier files need a sheet with these columns (same as your ERP export):
 3. Required columns: `item code`, `net cost`, `supplier name`""")
     else:
         total_products = pi['Product No.'].nunique()
-        exact   = sum(1 for v in source_map.values() if v == 'exact')
-        fuzzy   = sum(1 for v in source_map.values() if 'fuzzy' in str(v))
+        exact   = sum(1 for v in source_map.values() if v in ('FIFO','WAC'))
+        avg_cnt = sum(1 for v in source_map.values() if 'Averaging' in str(v))
         override= sum(1 for v in source_map.values() if v == 'override')
         estimated = total_products - len(supplier_map)
 
         c1,c2,c3,c4,c5 = st.columns(5)
-        c1.metric("✅ Exact Match",    f"{exact:,}",    help="Item code matched directly")
-        c2.metric("🔄 Fuzzy Match",    f"{fuzzy:,}",    help="Name similarity ≥ 85%")
+        c1.metric("✅ FIFO/WAC",        f"{exact:,}",    help="Exact product match — oldest batch cost used first (FIFO); same-date batches averaged (WAC)")
+        c2.metric("🔀 Averaging",       f"{avg_cnt:,}",  help="No exact match found — cost averaged across same-code + same-qualifier variants")
         c3.metric("✏️ Manual Override", f"{override:,}", help="Entered in COST_OVERRIDES tab")
-        c4.metric("⚠️ Estimated",      f"{estimated:,}", help="Using WAC ± adjustment")
+        c4.metric("⚠️ No Cost",        f"{estimated:,}", help="No supplier data available for this product")
         coverage = len(supplier_map)/total_products*100
         c5.metric("📊 Coverage",       f"{coverage:.1f}%")
 
@@ -5682,6 +5715,14 @@ elif page == "📋 Sales & Profit Report":
             _g['Act M%']     = (_g['Act_P'] / _g['Sale_Val'].replace(0, np.nan) * 100).round(1).fillna(0)
             _g['Act Profit'] = _g['Act_P'].apply(fmt_m)
             _cols += ['Act Profit', 'Act M%']
+        # Add Cost/Sqm and Method when grouping by Product
+        if grp_col == 'Product No.':
+            _wac_rpt = st.session_state.get('supplier_wac_map', {})
+            _src_rpt = st.session_state.get('supplier_source_map', {})
+            if _wac_rpt:
+                _g['Cost/Sqm']   = _g[grp_col].apply(lambda p: _wac_rpt.get(str(p).strip().upper(), None))
+                _g['Cost Method']= _g[grp_col].apply(lambda p: _src_rpt.get(str(p).strip().upper(), '—'))
+                _cols += ['Cost/Sqm', 'Cost Method']
         # Totals row
         _tot = {c: '' for c in _cols}
         _tot[grp_col] = '📊 TOTAL'
@@ -5733,10 +5774,13 @@ elif page == "📋 Sales & Profit Report":
             _dg.metric("ERP Margin%",   f"{_erp_p/_sv_dd*100:.1f}%" if _sv_dd > 0 else "—")
 
             # ── Cost columns ───────────────────────────────────────
-            _wac_dd = st.session_state.get('supplier_wac_map', {})
+            _wac_dd  = st.session_state.get('supplier_wac_map', {})
+            _src_dd  = st.session_state.get('supplier_source_map', {})
             if 'Product No.' in _dd_all.columns and _wac_dd:
                 _dd_all['Cost/Sqm'] = _dd_all['Product No.'].apply(
                     lambda p: _wac_dd.get(str(p).strip().upper(), None))
+                _dd_all['Cost Method'] = _dd_all['Product No.'].apply(
+                    lambda p: _src_dd.get(str(p).strip().upper(), '—'))
                 _dd_all['Total Cost'] = _dd_all.apply(
                     lambda r: round(r['Cost/Sqm'] * r['Sq.m'], 2) if pd.notna(r.get('Cost/Sqm')) else None, axis=1)
                 _dd_all['Act Profit'] = _dd_all.apply(
@@ -5753,7 +5797,7 @@ elif page == "📋 Sales & Profit Report":
             # ── Table ──────────────────────────────────────────────
             _bill_cols = ['Date', 'Bill No.', 'Product No.', 'Account Name', 'Salesman', 'Sq.m', 'SALE', 'RETURN', 'Profit', 'Type']
             if 'Cost/Sqm' in _dd_all.columns:
-                _bill_cols += ['Cost/Sqm', 'Total Cost', 'Act Profit']
+                _bill_cols += ['Cost/Sqm', 'Cost Method', 'Total Cost', 'Act Profit']
             elif is_admin and 'Actual Profit' in _dd_all.columns:
                 _bill_cols.append('Actual Profit')
             _avail_dd = [c for c in _bill_cols if c in _dd_all.columns]
@@ -5867,3 +5911,169 @@ elif page == "📋 Sales & Profit Report":
             if _sel_s != '📊 TOTAL':
                 _show_drilldown('Salesman', _sel_s, _sel_s)
         st.download_button("📥 Download CSV", _raw.to_csv(index=False), "salesman_report.csv", "text/csv")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# LABOUR COSTS PAGE
+# Track daily loading / unloading expenses by size and box rate
+# ─────────────────────────────────────────────────────────────────────────────
+elif page == "🚛 Labour Costs":
+    if not is_admin: st.error("Admin only."); st.stop()
+
+    st.title("🚛 Labour Costs")
+    with st.expander("ℹ️ About this report", expanded=False):
+        st.markdown("""
+**What it tracks:** Daily loading and unloading labour costs, broken down by tile size and box count.
+
+**How to use:**
+- Select the date and expense type (Loading / Unloading / Both)
+- Choose the size category (e.g. 40×40, 60×60, 60×120…)
+- Enter the number of boxes and the rate per box
+- Click **Add Entry** — the total is calculated automatically (Boxes × Rate)
+- **Example:** 1,000 boxes of 40×40 at Rs 8/box = Rs 8,000 for that day
+- Download all entries as CSV at any time for your accounts
+        """)
+
+    st.divider()
+
+    # ── Session state store ──────────────────────────────────────
+    if 'labour_entries' not in st.session_state:
+        st.session_state['labour_entries'] = []
+
+    # ── Entry form ───────────────────────────────────────────────
+    st.subheader("➕ Log New Entry")
+    with st.form("labour_form", clear_on_submit=True):
+        fc1, fc2, fc3 = st.columns(3)
+        with fc1:
+            _lc_date  = st.date_input("Date", value=datetime.now().date(), key="lc_date")
+        with fc2:
+            _lc_type  = st.selectbox("Type", ["Unloading", "Loading", "Both"], key="lc_type")
+        with fc3:
+            _lc_shift = st.selectbox("Shift", ["Day", "Night", "Full Day"], key="lc_shift")
+
+        fc4, fc5, fc6, fc7 = st.columns(4)
+        with fc4:
+            _lc_size  = st.selectbox("Tile Size", [
+                "30×30", "30×60", "40×40", "60×60", "60×90",
+                "60×120", "80×80", "80×160", "120×120", "Other"
+            ], key="lc_sz")
+        with fc5:
+            _lc_cat   = st.selectbox("Category", ["P", "A", "B", "C", "D", "Other"], key="lc_cat")
+        with fc6:
+            _lc_boxes = st.number_input("No. of Boxes", min_value=1, value=1000, step=50, key="lc_boxes")
+        with fc7:
+            _lc_rate  = st.number_input("Rate / Box (Rs)", min_value=0.0, value=8.0, step=0.5, format="%.2f", key="lc_rate")
+
+        _lc_note = st.text_input("Notes (optional)", placeholder="e.g. Supplier delivery — Montage", key="lc_note")
+
+        _lc_submit = st.form_submit_button("✅ Add Entry", use_container_width=True, type="primary")
+
+    if _lc_submit:
+        _lc_total = round(_lc_boxes * _lc_rate, 2)
+        st.session_state['labour_entries'].append({
+            'Date'      : str(_lc_date),
+            'Type'      : _lc_type,
+            'Shift'     : _lc_shift,
+            'Size'      : _lc_size,
+            'Category'  : _lc_cat,
+            'Boxes'     : int(_lc_boxes),
+            'Rate/Box'  : float(_lc_rate),
+            'Total (Rs)': _lc_total,
+            'Notes'     : _lc_note.strip(),
+        })
+        st.success(f"✅ Added: {_lc_boxes:,} boxes × Rs {_lc_rate:.2f} = **Rs {_lc_total:,.2f}**")
+        st.rerun()
+
+    # ── Entries table ────────────────────────────────────────────
+    st.divider()
+    _lc_entries = st.session_state.get('labour_entries', [])
+
+    if not _lc_entries:
+        st.info("No entries yet. Use the form above to log your first entry.")
+    else:
+        _lc_df = pd.DataFrame(_lc_entries)
+        _lc_df['Date'] = pd.to_datetime(_lc_df['Date'])
+
+        # ── KPI strip ────────────────────────────────────────────
+        _lc_total_rs = _lc_df['Total (Rs)'].sum()
+        _lc_total_bx = _lc_df['Boxes'].sum()
+        _lc_days     = _lc_df['Date'].nunique()
+        _lc_avg_day  = _lc_total_rs / _lc_days if _lc_days > 0 else 0
+        _lc_avg_box  = _lc_total_rs / _lc_total_bx if _lc_total_bx > 0 else 0
+
+        k1,k2,k3,k4,k5 = st.columns(5)
+        k1.metric("Total Labour Cost", f"Rs {_lc_total_rs:,.0f}")
+        k2.metric("Total Boxes",       f"{_lc_total_bx:,}")
+        k3.metric("Days Logged",       f"{_lc_days}")
+        k4.metric("Avg Cost / Day",    f"Rs {_lc_avg_day:,.0f}")
+        k5.metric("Blended Rate/Box",  f"Rs {_lc_avg_box:.2f}")
+
+        st.divider()
+
+        # ── Date filter ──────────────────────────────────────────
+        _lc_f1, _lc_f2, _lc_f3 = st.columns(3)
+        with _lc_f1:
+            _lc_ftype = st.selectbox("Filter Type", ["All"] + sorted(_lc_df['Type'].unique().tolist()), key="lc_ftype")
+        with _lc_f2:
+            _lc_fsz   = st.selectbox("Filter Size", ["All"] + sorted(_lc_df['Size'].unique().tolist()), key="lc_fsz")
+        with _lc_f3:
+            _lc_fcat  = st.selectbox("Filter Category", ["All"] + sorted(_lc_df['Category'].unique().tolist()), key="lc_fcat")
+
+        _lc_fdf = _lc_df.copy()
+        if _lc_ftype != 'All': _lc_fdf = _lc_fdf[_lc_fdf['Type']     == _lc_ftype]
+        if _lc_fsz   != 'All': _lc_fdf = _lc_fdf[_lc_fdf['Size']     == _lc_fsz]
+        if _lc_fcat  != 'All': _lc_fdf = _lc_fdf[_lc_fdf['Category'] == _lc_fcat]
+
+        _lc_fdf_disp = _lc_fdf.copy()
+        _lc_fdf_disp['Date'] = _lc_fdf_disp['Date'].dt.strftime('%d-%b-%Y')
+
+        st.subheader(f"📋 All Entries ({len(_lc_fdf_disp):,} rows)")
+        # Editable table — user can correct mistakes
+        _lc_edited = st.data_editor(
+            _lc_fdf_disp,
+            hide_index=True,
+            use_container_width=True,
+            num_rows="dynamic",
+            key="lc_editor"
+        )
+
+        # ── Daily summary ────────────────────────────────────────
+        st.divider()
+        st.subheader("📅 Daily Summary")
+        _lc_daily = _lc_fdf.groupby('Date').agg(
+            Entries  = ('Total (Rs)', 'count'),
+            Boxes    = ('Boxes', 'sum'),
+            Total_Rs = ('Total (Rs)', 'sum'),
+        ).reset_index().sort_values('Date', ascending=False)
+        _lc_daily['Date']      = _lc_daily['Date'].dt.strftime('%d-%b-%Y')
+        _lc_daily['Total (Rs)']= _lc_daily['Total_Rs'].apply(lambda x: f"Rs {x:,.0f}")
+        _lc_daily['Boxes']     = _lc_daily['Boxes'].apply(lambda x: f"{x:,}")
+        st.dataframe(_lc_daily[['Date','Entries','Boxes','Total (Rs)']], hide_index=True, use_container_width=True)
+
+        # ── By Size summary ──────────────────────────────────────
+        st.divider()
+        st.subheader("📐 Summary by Size")
+        _lc_bysz = _lc_fdf.groupby('Size').agg(
+            Boxes    = ('Boxes', 'sum'),
+            Total_Rs = ('Total (Rs)', 'sum'),
+        ).reset_index().sort_values('Total_Rs', ascending=False)
+        _lc_bysz['Total (Rs)']   = _lc_bysz['Total_Rs'].apply(lambda x: f"Rs {x:,.0f}")
+        _lc_bysz['Avg Rate/Box'] = (_lc_fdf.groupby('Size').apply(
+            lambda g: (g['Total (Rs)'].sum() / g['Boxes'].sum()) if g['Boxes'].sum() > 0 else 0
+        ).reindex(_lc_bysz['Size']).values)
+        _lc_bysz['Avg Rate/Box'] = _lc_bysz['Avg Rate/Box'].apply(lambda x: f"Rs {x:.2f}")
+        st.dataframe(_lc_bysz[['Size','Boxes','Total (Rs)','Avg Rate/Box']], hide_index=True, use_container_width=True)
+
+        # ── Download ─────────────────────────────────────────────
+        st.divider()
+        _lc_csv = _lc_fdf_disp.to_csv(index=False)
+        st.download_button("📥 Download Labour Cost CSV", _lc_csv,
+                           "labour_costs.csv", "text/csv", key="lc_dl")
+
+        # ── Delete all (with confirm) ────────────────────────────
+        st.divider()
+        with st.expander("⚠️ Clear All Entries", expanded=False):
+            st.warning("This will remove all entries from this session. Download CSV first if needed.")
+            if st.button("🗑️ Clear All Entries", key="lc_clear", type="primary"):
+                st.session_state['labour_entries'] = []
+                st.rerun()
