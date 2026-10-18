@@ -6058,9 +6058,10 @@ elif page == "🚛 Labour Costs":
             Total_Rs = ('Total (Rs)', 'sum'),
         ).reset_index().sort_values('Total_Rs', ascending=False)
         _lc_bysz['Total (Rs)']   = _lc_bysz['Total_Rs'].apply(lambda x: f"Rs {x:,.0f}")
-        _lc_bysz['Avg Rate/Box'] = (_lc_fdf.groupby('Size').apply(
-            lambda g: (g['Total (Rs)'].sum() / g['Boxes'].sum()) if g['Boxes'].sum() > 0 else 0
-        ).reindex(_lc_bysz['Size']).values)
+        _lc_avg_rate = {}
+        for _sz, _grp in _lc_fdf.groupby('Size'):
+            _lc_avg_rate[_sz] = (_grp['Total (Rs)'].sum() / _grp['Boxes'].sum()) if _grp['Boxes'].sum() > 0 else 0
+        _lc_bysz['Avg Rate/Box'] = _lc_bysz['Size'].map(_lc_avg_rate)
         _lc_bysz['Avg Rate/Box'] = _lc_bysz['Avg Rate/Box'].apply(lambda x: f"Rs {x:.2f}")
         st.dataframe(_lc_bysz[['Size','Boxes','Total (Rs)','Avg Rate/Box']], hide_index=True, use_container_width=True)
 
