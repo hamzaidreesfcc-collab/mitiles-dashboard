@@ -6735,6 +6735,7 @@ Total return value across all time: **{_fmt(abs(_total_ret_val))}**
         "💰 GP Bridge",
         "📈 Cost Drift",
         "🔗 Affinity",
+        "🔁 Missed Reorders",
     ])
 
     # ── TAB 1: REORDER ───────────────────────────────────────────────────────
@@ -6900,3 +6901,190 @@ Total return value across all time: **{_fmt(abs(_total_ret_val))}**
                 st.download_button("📥 Download Affinity Data",
                                    _aff_show.to_csv(index=False),
                                    "product_affinity.csv", key="dl_aff")
+
+    # ── TAB 9: MISSED REORDERS ───────────────────────────────────────────────
+    with _tabs[8]:
+        st.subheader("🔁 Missed Reorders — Fast movers that were never restocked")
+        st.caption(
+            "Products that proved demand (stable or volatile fast movers historically) "
+            "but were not reordered after the initial purchase. "
+            "These are your missed revenue opportunities."
+        )
+
+        try:
+            _s_all  = df[df['Type'] == 'S'].copy()
+            _p_all  = df[df['Type'].isin(['P', 'O.S'])].copy()
+
+            if _s_all.empty or _p_all.empty:
+                st.info("Not enough sales or purchase data to compute missed reorders.")
+            else:
+                # ── Sales velocity per product (all time) ────────────────────
+                _s_all['Date'] = pd.to_datetime(_s_all['Date'], errors='coerce')
+                _p_all['Date'] = pd.to_datetime(_p_all['Date'], errors='coerce')
+
+                _s_grp = (_s_all.groupby('Product No.')
+                          .agg(
+                              TotalSalesQty=('Qty', 'sum'),
+                              TotalRevenue=('SALE', 'sum'),
+                              SaleDays=('Date', lambda x: (x.max() - x.min()).days + 1),
+                              FirstSale=('Date', 'min'),
+                              LastSale=('Date', 'max'),
+                              BillCount=('Bill No.', 'nunique'),
+                          ).reset_index())
+
+                # Daily velocity (all-time)
+                _s_grp['Daily Sqm'] = _s_grp.apply(
+                    lambda r: r['TotalSalesQty'] / max(r['SaleDays'], 1), axis=1
+                )
+
+                # Coefficient of Variation to classify demand pattern
+                _cv_map = {}
+                for _pno, _grp in _s_all.groupby('Product No.'):
+                    _weekly = (_grp.set_index('Date').resample('W')['Qty'].sum())
+                    if len(_weekly) >= 4 and _weekly.mean() > 0:
+                        _cv_map[_pno] = _weekly.std() / _weekly.mean()
+                    else:
+                        _cv_map[_pno] = None
+
+                _s_grp['CV'] = _s_grp['Product No.'].map(_cv_map)
+                _s_grp['Demand Pattern'] = _s_grp['CV'].apply(
+                    lambda v: '🔁 Stable Fast Mover'   if v is not None and v <= 0.5
+                    else      '⚡ Volatile Fast Mover'  if v is not None and v > 0.5
+                    else      '❓ Insufficient Data'
+                )
+
+                # Keep only fast movers (stable or volatile)
+                _fast = _s_grp[_s_grp['Demand Pattern'].isin(
+                    ['🔁 Stable Fast Mover', '⚡ Volatile Fast Mover']
+                )].copy()
+
+                # ── Purchase history per product ─────────────────────────────
+                _p_grp = (_p_all.groupby('Product No.')
+                          .agg(
+                              PurchaseCount=('Bill No.', 'nunique'),
+                              FirstPurchase=('Date', 'min'),
+                              LastPurchase=('Date', 'max'),
+                          ).reset_index())
+
+                # ── Merge: fast movers + purchase history ────────────────────
+                _mr = _fast.merge(_p_grp, on='Product No.', how='left')
+
+                # "Never Reordered" = only 1 purchase batch ever (or never purchased again
+                # after first, meaning LastPurchase ≈ FirstPurchase within 30 days)
+                _mr['PurchaseCount']  = _mr['PurchaseCount'].fillna(0)
+                _mr['LastPurchase']   = pd.to_datetime(_mr['LastPurchase'], errors='coerce')
+                _mr['FirstPurchase']  = pd.to_datetime(_mr['FirstPurchase'], errors='coerce')
+                _mr['LastSale']       = pd.to_datetime(_mr['LastSale'], errors='coerce')
+
+                _mr['Days Since Reorder'] = (_today - _mr['LastPurchase']).dt.days
+                _mr['Reorder Gap (days)'] = (_mr['LastPurchase'] - _mr['FirstPurchase']).dt.days
+
+                # Flag: never reordered = only 1 purchase event OR gap between first and last
+                # purchase < 30 days (same batch)
+                _mr['Never Reordered'] = (
+                    (_mr['PurchaseCount'] <= 1) |
+                    (_mr['Reorder Gap (days)'] < 30)
+                )
+
+                _missed = _mr[_mr['Never Reordered']].copy()
+
+                # ── Enrich with product metadata ─────────────────────────────
+                if not prod.empty:
+                    _prod_meta = prod[['Product No.', 'Brand Name', 'Category', 'Size']].drop_duplicates('Product No.')
+                    _missed = _missed.merge(_prod_meta, on='Product No.', how='left')
+
+                # ── Estimate missed revenue ──────────────────────────────────
+                # Days from last purchase to today where stock likely ran out
+                # Proxy: if last sale was before today and product still had velocity,
+                # missed days = days since last sale
+                _missed['Days Since Last Sale'] = (_today - _missed['LastSale']).dt.days
+                _missed['Est. Missed Rev (Rs)'] = (
+                    _missed['Daily Sqm'] *
+                    _missed['Days Since Last Sale'].clip(lower=0) *
+                    (_missed['TotalRevenue'] / _missed['TotalSalesQty'].replace(0, None))
+                ).round(0)
+
+                # ── Summary KPIs ─────────────────────────────────────────────
+                _mr_c1, _mr_c2, _mr_c3, _mr_c4 = st.columns(4)
+                _mr_c1.metric("Fast Movers Found",       f"{len(_fast):,}")
+                _mr_c2.metric("Never Reordered",         f"{len(_missed):,}")
+                _mr_c3.metric("Est. Missed Revenue",
+                               f"Rs {_missed['Est. Missed Rev (Rs)'].sum():,.0f}"
+                               if not _missed.empty else "—")
+                _mr_c4.metric("Avg Days Since Restock",
+                               f"{_missed['Days Since Reorder'].median():.0f}d"
+                               if not _missed.empty else "—")
+
+                st.divider()
+
+                # ── Filters ──────────────────────────────────────────────────
+                _mrf1, _mrf2 = st.columns(2)
+                _mr_pat = _mrf1.multiselect(
+                    "Demand Pattern",
+                    ['🔁 Stable Fast Mover', '⚡ Volatile Fast Mover'],
+                    default=['🔁 Stable Fast Mover', '⚡ Volatile Fast Mover'],
+                    key="mr_pat"
+                )
+                _mr_brands = ['All'] + sorted(_missed['Brand Name'].dropna().unique().tolist()) \
+                    if 'Brand Name' in _missed.columns else ['All']
+                _mr_brand = _mrf2.selectbox("Brand", _mr_brands, key="mr_brand")
+
+                _missed_f = _missed[_missed['Demand Pattern'].isin(_mr_pat)].copy()
+                if _mr_brand != 'All' and 'Brand Name' in _missed_f.columns:
+                    _missed_f = _missed_f[_missed_f['Brand Name'] == _mr_brand]
+
+                _missed_f = _missed_f.sort_values('Est. Missed Rev (Rs)', ascending=False)
+
+                # ── Display columns ──────────────────────────────────────────
+                _mr_show_cols = [c for c in [
+                    'Product No.', 'Brand Name', 'Category', 'Size',
+                    'Demand Pattern',
+                    'BillCount', 'TotalSalesQty', 'TotalRevenue',
+                    'Daily Sqm',
+                    'FirstSale', 'LastSale', 'Days Since Last Sale',
+                    'LastPurchase', 'Days Since Reorder',
+                    'Est. Missed Rev (Rs)'
+                ] if c in _missed_f.columns]
+
+                _mr_rename = {
+                    'BillCount':          'Bills',
+                    'TotalSalesQty':      'Total Sq.m Sold',
+                    'TotalRevenue':       'Revenue (Rs)',
+                    'Daily Sqm':          'Daily Velocity',
+                    'FirstSale':          'First Sale',
+                    'LastSale':           'Last Sale',
+                    'LastPurchase':       'Last Restocked',
+                    'Days Since Reorder': 'Days Since Restock',
+                }
+                _mr_disp = _missed_f[_mr_show_cols].rename(columns=_mr_rename).copy()
+
+                # Format dates
+                for _dc in ['First Sale', 'Last Sale', 'Last Restocked']:
+                    if _dc in _mr_disp.columns:
+                        _mr_disp[_dc] = pd.to_datetime(_mr_disp[_dc], errors='coerce').dt.strftime('%d-%b-%Y')
+
+                for _nc in ['Total Sq.m Sold', 'Revenue (Rs)', 'Daily Velocity', 'Est. Missed Rev (Rs)']:
+                    if _nc in _mr_disp.columns:
+                        _mr_disp[_nc] = _mr_disp[_nc].round(1)
+
+                st.dataframe(_mr_disp.reset_index(drop=True), hide_index=True, use_container_width=True)
+
+                if not _mr_disp.empty:
+                    st.download_button(
+                        "📥 Download Missed Reorders",
+                        _missed_f[_mr_show_cols].to_csv(index=False),
+                        "missed_reorders.csv",
+                        key="dl_mr"
+                    )
+
+                st.divider()
+                st.info(
+                    "💡 **How to read this:** These products have demonstrated real demand "
+                    "(stable or volatile fast movers over their sales history) but were never "
+                    "restocked after the first purchase batch. "
+                    "Estimated missed revenue = daily velocity × days since last sale × avg price/sqm. "
+                    "Prioritise by Est. Missed Rev to find the highest-impact restock decisions."
+                )
+
+        except Exception as _mr_err:
+            st.error(f"Could not compute missed reorders: {_mr_err}")
