@@ -15,7 +15,7 @@ try:
     _ANTHROPIC_AVAILABLE = True
 except ImportError:
     _ANTHROPIC_AVAILABLE = False
-st.set_page_config(page_title="Mi-Tiles Intelligence", page_icon="🏠", layout="wide", initial_sidebar_state="expanded")
+st.set_page_config(page_title="My Dashboard", page_icon="🏠", layout="wide", initial_sidebar_state="expanded")
 
 # ── PRIVATE ACCESS GATE ───────────────────────────────────
 _APP_TOKEN = st.secrets.get("APP_TOKEN", "")
@@ -176,7 +176,7 @@ ROLE_PAGES = {
 }
 
 def login():
-    st.markdown("<div style='text-align:center;padding:60px 0 20px'><h1>🏠 Mi-Tiles</h1><h3 style='color:gray'>Inventory Intelligence Dashboard</h3></div>", unsafe_allow_html=True)
+    st.markdown("<div style='text-align:center;padding:60px 0 20px'><h1>🏠 My Dashboard</h1><h3 style='color:gray'>Inventory Intelligence</h3></div>", unsafe_allow_html=True)
     _, col, _ = st.columns([1,1,1])
     with col:
         u = st.text_input("Username")
@@ -923,7 +923,7 @@ def _log_audit_submission(tier: str, products: int, shrinkage_rs: float):
 # ─────────────────────────────────────────────
 # LOAD
 # ─────────────────────────────────────────────
-with st.spinner("Loading Mi-Tiles data..."):
+with st.spinner("Loading data..."):
     df, prod = load_data(DATA_PATH)
     pi       = build_pi(df, prod)
     pairs_df, size_pairs_df = build_pairs(df, prod)
@@ -4423,7 +4423,7 @@ Your supplier files need a sheet with these columns (same as your ERP export):
 
 
 elif page == "📖 Formula Guide":
-    st.title("📖 Mi-Tiles Dashboard — Formula & Logic Guide")
+    st.title("📖 My Dashboard — Formula & Logic Guide")
     with st.expander("ℹ️ About this report", expanded=False):
         st.markdown("**What it shows:** The exact formulas, definitions, and business logic behind every metric in the dashboard — your reference manual.\n\n**How to use it:**\n- If a number looks wrong, come here first.\n- Each section covers one metric: formula, data source, edge cases, and a worked example.\n- **No black boxes** — every AI score, velocity calculation, and classification rule is documented with plain-English explanations.")
     st.caption("Every metric, formula, and classification rule used in this dashboard. Reference this whenever a number looks unexpected.")
@@ -4773,7 +4773,7 @@ C = Bottom 5%
         """)
 
     st.divider()
-    st.caption("Mi-Tiles Intelligence Dashboard — Formula Guide v1.0 | Built with Claude AI")
+    st.caption("My Dashboard — Formula Guide v1.0 | Built with Claude AI")
 
     # Download button for the markdown file
     guide_text = open.__doc__  # placeholder
