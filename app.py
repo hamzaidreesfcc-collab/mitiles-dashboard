@@ -893,7 +893,11 @@ def _build_ai_insights(_df, _prod, _wac_json="{}"):
     _sold_60  = set(_sales[_sales['Date'] >= _today - pd.Timedelta(days=60)]['Product No.'].unique())
     _sold_90  = set(_sales[_sales['Date'] >= _today - pd.Timedelta(days=90)]['Product No.'].unique())
     _sold_120 = set(_sales[_sales['Date'] >= _today - pd.Timedelta(days=120)]['Product No.'].unique())
-    _dead = _sv[_sv['Daily Sqm'] == 0].copy()
+    # Exclude recently purchased products (within 60 days) — newly restocked stock isn't dead yet
+    _recently_purchased = set(
+        _purch[_purch['Date'] >= _today - pd.Timedelta(days=60)]['Product No.'].unique()
+    )
+    _dead = _sv[(_sv['Daily Sqm'] == 0) & (~_sv['Product No.'].isin(_recently_purchased))].copy()
     _dead['Last Sale'] = _dead['Product No.'].map(
         _sales.groupby('Product No.')['Date'].max().dt.strftime('%d-%b-%Y'))
     _dead['Dead Since'] = _dead['Product No.'].apply(
