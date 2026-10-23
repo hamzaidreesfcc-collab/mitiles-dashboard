@@ -6824,8 +6824,8 @@ Total return value across all time: **{_fmt(abs(_total_ret_val))}**
 
     # ── TAB 1: REORDER ───────────────────────────────────────────────────────
     with _tabs[0]:
-        st.subheader(f"📦 Reorder Alerts — {len(_reorder):,} products below {_reorder_days} days")
         _rd_thresh = st.slider("Days of stock threshold", 7, 60, 30, key="rd_thresh")
+        st.subheader(f"📦 Reorder Alerts — {len(_sv[(_sv['Daily Sqm'] > 0) & (_sv['Days of Stock'] < _rd_thresh)]):,} products below {_rd_thresh} days")
         _reorder_f = _sv[(_sv['Daily Sqm'] > 0) & (_sv['Days of Stock'] < _rd_thresh)].copy()
         _reorder_f = _reorder_f.sort_values('Days of Stock')
         _reorder_f['Cost (Rs)'] = _reorder_f.apply(
