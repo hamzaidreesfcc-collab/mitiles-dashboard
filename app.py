@@ -849,6 +849,250 @@ def build_pairs(_df, _prod):
                                columns=['Size A','Size B','Co-occurrence']).sort_values('Co-occurrence',ascending=False)
     return pairs, size_pairs
 
+
+@st.cache_data(ttl=1800, show_spinner=False)
+def _build_ai_insights(_df, _prod, _wac_json="{}"):
+    """Pre-compute all AI Insights datasets once per data refresh.
+    Returns a dict of dataframes/dicts used by the AI Insights page.
+    Cached for 30 min — same TTL as load_data."""
+    import json as _json
+    _wac_map = _json.loads(_wac_json)
+
+    _today   = pd.Timestamp(_df['Date'].max())
+    _sales   = _df[_df['Type'] == 'S'].copy()
+    _purch   = _df[_df['Type'].isin(['P', 'O.S'])].copy()
+
+    # ── Stock snapshot ──────────────────────────────────────────────────
+    _stock_df = (_df.sort_values('Date')
+                    .groupby('Product No.')['Closing']
+                    .last().reset_index()
+                    .rename(columns={'Closing': 'Stock (Sq.m)'}))
+    _stock_df = _stock_df[_stock_df['Stock (Sq.m)'] > 0]
+
+    # ── 90-day velocity ─────────────────────────────────────────────────
+    _win90 = _sales[_sales['Date'] >= _today - pd.Timedelta(days=90)]
+    _vel   = (_win90.groupby('Product No.')['Sq.m'].sum() / 90).reset_index()
+    _vel.columns = ['Product No.', 'Daily Sqm']
+
+    _sv = _stock_df.merge(_vel, on='Product No.', how='left')
+    _sv['Daily Sqm']    = _sv['Daily Sqm'].fillna(0)
+    _sv['Days of Stock'] = (_sv['Stock (Sq.m)'] / _sv['Daily Sqm'].replace(0, None)).round(1)
+    if not _prod.empty:
+        _sv = _sv.merge(
+            _prod[['Product No.','Brand Name','Category','Size']].drop_duplicates('Product No.'),
+            on='Product No.', how='left')
+
+    # ── Reorder alerts ──────────────────────────────────────────────────
+    _reorder = _sv[(_sv['Daily Sqm'] > 0) & (_sv['Days of Stock'] < 30)].copy()
+    _reorder = _reorder.sort_values('Days of Stock')
+    if _wac_map:
+        _reorder['Cost (Rs)'] = _reorder.apply(
+            lambda r: round(r['Stock (Sq.m)'] * _wac_map.get(str(r['Product No.']).upper(), 0), 0), axis=1)
+
+    # ── Dead stock ──────────────────────────────────────────────────────
+    _sold_60  = set(_sales[_sales['Date'] >= _today - pd.Timedelta(days=60)]['Product No.'].unique())
+    _sold_90  = set(_sales[_sales['Date'] >= _today - pd.Timedelta(days=90)]['Product No.'].unique())
+    _sold_120 = set(_sales[_sales['Date'] >= _today - pd.Timedelta(days=120)]['Product No.'].unique())
+    _dead = _sv[_sv['Daily Sqm'] == 0].copy()
+    _dead['Last Sale'] = _dead['Product No.'].map(
+        _sales.groupby('Product No.')['Date'].max().dt.strftime('%d-%b-%Y'))
+    _dead['Dead Since'] = _dead['Product No.'].apply(
+        lambda p: '120+ days' if p not in _sold_120 else
+                 ('90+ days'  if p not in _sold_90  else
+                 ('60+ days'  if p not in _sold_60  else '<60 days')))
+    if _wac_map:
+        _dead['Capital Trapped (Rs)'] = _dead.apply(
+            lambda r: round(r['Stock (Sq.m)'] * _wac_map.get(str(r['Product No.']).upper(), 0), 0), axis=1)
+    _dead = _dead.sort_values('Stock (Sq.m)', ascending=False)
+
+    # ── Margin erosion ──────────────────────────────────────────────────
+    _s90 = _sales[_sales['Date'] >= _today - pd.Timedelta(days=90)].copy()
+    _s90['Profit%'] = (_s90['Profit'] / _s90['SALE'].replace(0, None) * 100).round(2)
+    _prod_avg_margin = _s90.groupby('Product No.')['Profit%'].mean().to_dict()
+    _sales2 = _sales.copy()
+    _sales2['Profit%']   = (_sales2['Profit'] / _sales2['SALE'].replace(0, None) * 100).round(2)
+    _sales2['Avg Margin%'] = _sales2['Product No.'].map(_prod_avg_margin)
+    _sales2['Margin Drop'] = _sales2['Avg Margin%'] - _sales2['Profit%']
+    _eroded = _sales2[
+        (_sales2['Date'] >= _today - pd.Timedelta(days=30)) &
+        (_sales2['Margin Drop'] > 10) & (_sales2['SALE'] > 0)
+    ][['Date','Bill No.','Account Name','Product No.','SALE','Profit%','Avg Margin%','Margin Drop']].copy()
+    _eroded = _eroded.sort_values('Margin Drop', ascending=False)
+    _eroded['Date'] = pd.to_datetime(_eroded['Date']).dt.strftime('%d-%b-%Y')
+    _eroded['SALE'] = _eroded['SALE'].apply(lambda x: f"Rs {x:,.0f}")
+
+    # ── Churn early warning ─────────────────────────────────────────────
+    _cust = _sales.groupby('Account Name').agg(
+        Bills=('Bill No.','nunique'), First=('Date','min'),
+        Last=('Date','max'), Revenue=('SALE','sum')).reset_index()
+    _cust['Tenure Days']     = (_today - _cust['First']).dt.days
+    _cust['Days Since Last'] = (_today - _cust['Last']).dt.days
+    _cust['Avg Gap']         = (_cust['Tenure Days'] / _cust['Bills'].clip(lower=1)).round(0)
+    _cust['Overdue Ratio']   = (_cust['Days Since Last'] / _cust['Avg Gap'].replace(0, None)).round(2)
+    _churn = _cust[(_cust['Bills'] >= 3) & (_cust['Overdue Ratio'] >= 1.5) & (_cust['Days Since Last'] >= 20)].copy()
+    _churn = _churn.sort_values('Overdue Ratio', ascending=False)
+    _churn['Risk']          = _churn['Overdue Ratio'].apply(
+        lambda x: '🔴 Critical' if x >= 3 else ('🟠 High' if x >= 2 else '🟡 Medium'))
+    _churn['Last Purchase'] = _churn['Last'].dt.strftime('%d-%b-%Y')
+    _churn['Revenue']       = _churn['Revenue'].apply(lambda x: f"Rs {x:,.0f}")
+    _churn['Avg Gap']       = _churn['Avg Gap'].astype(int).astype(str) + ' days'
+    _churn['Days Since Last'] = _churn['Days Since Last'].astype(int)
+
+    # ── Rationalisation ─────────────────────────────────────────────────
+    _rat = _sv.merge(
+        _s90.groupby('Product No.').agg(Sales90=('SALE','sum'), Margin90=('Profit%','mean')).reset_index(),
+        on='Product No.', how='left')
+    _rat['Sales90']  = _rat['Sales90'].fillna(0)
+    _rat['Margin90'] = _rat['Margin90'].fillna(0)
+    _rat['StockRank']  = _rat['Stock (Sq.m)'].rank(pct=True) * 100
+    _rat['SalesRank']  = 100 - _rat['Sales90'].rank(pct=True) * 100
+    _rat['MarginRank'] = 100 - _rat['Margin90'].rank(pct=True) * 100
+    _rat['Rationalise Score'] = (_rat['StockRank']*0.4 + _rat['SalesRank']*0.35 + _rat['MarginRank']*0.25).round(1)
+    _rat = _rat[_rat['Stock (Sq.m)'] > 0].sort_values('Rationalise Score', ascending=False).head(30)
+    if _wac_map:
+        _rat['Capital (Rs)'] = _rat.apply(
+            lambda r: round(r['Stock (Sq.m)'] * _wac_map.get(str(r['Product No.']).upper(), 0), 0), axis=1)
+    _rat['Recommendation'] = _rat['Rationalise Score'].apply(
+        lambda x: '🔴 Discontinue / Deep Discount' if x >= 80 else ('🟠 Reduce Orders' if x >= 60 else '🟡 Monitor'))
+
+    # ── GP Bridge ───────────────────────────────────────────────────────
+    _this_m = _today.to_period('M')
+    _prev_m = (_today - pd.DateOffset(months=1)).to_period('M')
+    _s_m    = _sales.copy()
+    _s_m['Month'] = _s_m['Date'].dt.to_period('M')
+    def _gp_summary(d):
+        return {'Revenue': d['SALE'].sum(), 'GP': d['Profit'].sum(),
+                'Sqm': d['Sq.m'].sum(),
+                'GP%': (d['Profit'].sum()/d['SALE'].sum()*100) if d['SALE'].sum() > 0 else 0}
+    _cur_s = _gp_summary(_s_m[_s_m['Month'] == _this_m])
+    _prv_s = _gp_summary(_s_m[_s_m['Month'] == _prev_m])
+    _vol_effect  = (_cur_s['Sqm'] - _prv_s['Sqm']) * (_prv_s['GP'] / _prv_s['Sqm'] if _prv_s['Sqm'] > 0 else 0)
+    _rate_effect = _cur_s['GP'] - _prv_s['GP'] - _vol_effect
+    _gp_bridge   = pd.DataFrame([
+        {'Component': f"GP — {str(_prev_m)}",  'Amount (Rs)': round(_prv_s['GP'], 0)},
+        {'Component': '➕ Volume Effect',        'Amount (Rs)': round(_vol_effect, 0)},
+        {'Component': '➕ Rate / Margin Effect', 'Amount (Rs)': round(_rate_effect, 0)},
+        {'Component': f"= GP — {str(_this_m)}", 'Amount (Rs)': round(_cur_s['GP'], 0)},
+    ])
+
+    # ── Cost drift ──────────────────────────────────────────────────────
+    _p_cost = _purch[['Date','Product No.','Rate','Sq.m']].copy()
+    _p_cost['Date'] = pd.to_datetime(_p_cost['Date'])
+    _p_cost = _p_cost[_p_cost['Rate'] > 0]
+    _cut  = _today - pd.Timedelta(days=90)
+    _cut2 = _today - pd.Timedelta(days=180)
+    def _wac_p(d, s, e):
+        s2 = d[(d['Date'] >= s) & (d['Date'] < e)]
+        if s2.empty: return None
+        tq = s2['Sq.m'].sum()
+        return round((s2['Sq.m'] * s2['Rate']).sum() / tq, 2) if tq > 0 else None
+    _drift_rows = []
+    for _pno, _grp in _p_cost.groupby('Product No.'):
+        c_now  = _wac_p(_grp, _cut, _today)
+        c_prev = _wac_p(_grp, _cut2, _cut)
+        if c_now and c_prev and c_prev > 0:
+            dp = round((c_now - c_prev) / c_prev * 100, 1)
+            if abs(dp) >= 3:
+                _drift_rows.append({'Product No.': _pno, 'Cost 90d Ago': c_prev, 'Cost Now': c_now, 'Drift %': dp})
+    _drift_df = pd.DataFrame(_drift_rows).sort_values('Drift %', ascending=False) if _drift_rows else pd.DataFrame()
+    if not _drift_df.empty and not _prod.empty:
+        _drift_df = _drift_df.merge(
+            _prod[['Product No.','Brand Name','Size']].drop_duplicates('Product No.'),
+            on='Product No.', how='left')
+
+    # ── Affinity ────────────────────────────────────────────────────────
+    _bp = _sales.groupby('Bill No.')['Product No.'].apply(list)
+    _aff = {}
+    for _ps in _bp:
+        _ps = list(set(_ps))
+        for _i, _a in enumerate(_ps):
+            for _b in _ps[_i+1:]:
+                _k = tuple(sorted([_a, _b]))
+                _aff[_k] = _aff.get(_k, 0) + 1
+    _aff_df = pd.DataFrame(
+        [{'Product A': k[0], 'Product B': k[1], 'Co-Purchases': v} for k, v in _aff.items()]
+    ).sort_values('Co-Purchases', ascending=False).head(30) if _aff else pd.DataFrame()
+
+    # ── Missed Reorders ─────────────────────────────────────────────────
+    _mr_out = pd.DataFrame()
+    try:
+        _s_mr = _sales.copy()
+        _p_mr = _purch.copy()
+        _s_mr['Date'] = pd.to_datetime(_s_mr['Date'], errors='coerce')
+        _p_mr['Date'] = pd.to_datetime(_p_mr['Date'], errors='coerce')
+
+        _sg = _s_mr.groupby('Product No.').agg(
+            TotalSalesQty=('Sq.m','sum'), TotalRevenue=('SALE','sum'),
+            SaleDays=('Date', lambda x: (x.max()-x.min()).days+1),
+            FirstSale=('Date','min'), LastSale=('Date','max'),
+            BillCount=('Bill No.','nunique')).reset_index()
+        _sg['Daily Sqm'] = _sg['TotalSalesQty'] / _sg['SaleDays'].clip(lower=1)
+
+        _cv_map2 = {}
+        for _pno2, _grp2 in _s_mr.groupby('Product No.'):
+            _wk = _grp2.set_index('Date').resample('W')['Sq.m'].sum()
+            if len(_wk) >= 4 and _wk.mean() > 0:
+                _cv_map2[_pno2] = _wk.std() / _wk.mean()
+
+        _sg['CV'] = _sg['Product No.'].map(_cv_map2)
+        _sg['Demand Pattern'] = _sg['CV'].apply(
+            lambda v: '🔁 Stable Fast Mover'  if v is not None and v <= 0.5
+            else      '⚡ Volatile Fast Mover' if v is not None and v >  0.5
+            else      '❓ Insufficient Data')
+        _fast2 = _sg[_sg['Demand Pattern'].isin(['🔁 Stable Fast Mover','⚡ Volatile Fast Mover'])].copy()
+
+        _pg = _p_mr.groupby('Product No.').agg(
+            PurchaseCount=('Bill No.','nunique'),
+            FirstPurchase=('Date','min'), LastPurchase=('Date','max')).reset_index()
+
+        _mr2 = _fast2.merge(_pg, on='Product No.', how='left')
+        _mr2['PurchaseCount']  = _mr2['PurchaseCount'].fillna(0)
+        _mr2['LastPurchase']   = pd.to_datetime(_mr2['LastPurchase'],  errors='coerce')
+        _mr2['FirstPurchase']  = pd.to_datetime(_mr2['FirstPurchase'], errors='coerce')
+        _mr2['LastSale']       = pd.to_datetime(_mr2['LastSale'],      errors='coerce')
+        _mr2['Days Since Reorder'] = (_today - _mr2['LastPurchase']).dt.days
+        _mr2['Reorder Gap (days)'] = (_mr2['LastPurchase'] - _mr2['FirstPurchase']).dt.days
+        _mr2['Never Reordered']    = (_mr2['PurchaseCount'] <= 1) | (_mr2['Reorder Gap (days)'] < 30)
+        _missed2 = _mr2[_mr2['Never Reordered']].copy()
+        if not _prod.empty:
+            _missed2 = _missed2.merge(
+                _prod[['Product No.','Brand Name','Category','Size']].drop_duplicates('Product No.'),
+                on='Product No.', how='left')
+        _missed2['Days Since Last Sale'] = (_today - _missed2['LastSale']).dt.days
+        _missed2['Est. Missed Rev (Rs)'] = (
+            _missed2['Daily Sqm'] * _missed2['Days Since Last Sale'].clip(lower=0) *
+            (_missed2['TotalRevenue'] / _missed2['TotalSalesQty'].replace(0, None))
+        ).round(0)
+        _mr_out = _missed2.sort_values('Est. Missed Rev (Rs)', ascending=False)
+    except Exception:
+        pass
+
+    return {
+        'today':    _today,
+        'sales':    _sales,
+        'purch':    _purch,
+        'sv':       _sv,
+        'reorder':  _reorder,
+        'dead':     _dead,
+        'sold_60':  _sold_60,
+        'sold_90':  _sold_90,
+        'sold_120': _sold_120,
+        'eroded':   _eroded,
+        'sales2':   _sales2,
+        'churn':    _churn,
+        'rat':      _rat,
+        'this_m':   _this_m,
+        'prev_m':   _prev_m,
+        's_m':      _s_m,
+        'cur_s':    _cur_s,
+        'prv_s':    _prv_s,
+        'gp_bridge':_gp_bridge,
+        'drift_df': _drift_df,
+        'aff_df':   _aff_df,
+        'mr_df':    _mr_out,
+    }
+
+
 # ─────────────────────────────────────────────
 # AUDIT LOG SYSTEM
 # ─────────────────────────────────────────────
@@ -6169,194 +6413,34 @@ elif page == "🤖 AI Insights":
 
     st.divider()
 
-    # ── Shared base datasets ─────────────────────────────────────────────────
-    _today    = pd.Timestamp(df['Date'].max())
-    _sales    = df[df['Type'] == 'S'].copy()
-    _purch    = df[df['Type'].isin(['P','O.S'])].copy()
+    # ── Load all AI datasets from cache ──────────────────────────────────────
+    import json as _json_mod
     _wac_map  = st.session_state.get('supplier_wac_map', {})
+    _ai       = _build_ai_insights(df, prod, _json_mod.dumps(_wac_map, sort_keys=True))
+    _today    = _ai['today']
+    _sales    = _ai['sales']
+    _purch    = _ai['purch']
+    _sv       = _ai['sv']
+    _reorder  = _ai['reorder']
+    _dead     = _ai['dead']
+    _sold_60  = _ai['sold_60']
+    _sold_90  = _ai['sold_90']
+    _sold_120 = _ai['sold_120']
+    _eroded   = _ai['eroded']
+    _sales2   = _ai['sales2']
+    _churn_warn = _ai['churn']
+    _rat      = _ai['rat']
+    _this_m   = _ai['this_m']
+    _prev_m   = _ai['prev_m']
+    _s_m      = _ai['s_m']
+    _cur_s    = _ai['cur_s']
+    _prv_s    = _ai['prv_s']
+    _gp_bridge = _ai['gp_bridge']
+    _drift_df  = _ai['drift_df']
+    _aff_df    = _ai['aff_df']
+    _mr_cached = _ai['mr_df']
 
-    # Current stock: last Closing value per product
-    _stock_df = (df.sort_values('Date')
-                   .groupby('Product No.')['Closing']
-                   .last()
-                   .reset_index()
-                   .rename(columns={'Closing': 'Stock (Sq.m)'}))
-    _stock_df = _stock_df[_stock_df['Stock (Sq.m)'] > 0]
-
-    # 90-day sales velocity per product (sq.m / day)
-    _win90    = _sales[_sales['Date'] >= _today - pd.Timedelta(days=90)]
-    _vel      = (_win90.groupby('Product No.')['Sq.m'].sum() / 90).reset_index()
-    _vel.columns = ['Product No.', 'Daily Sqm']
-
-    # Merge stock + velocity
-    _sv = _stock_df.merge(_vel, on='Product No.', how='left')
-    _sv['Daily Sqm'] = _sv['Daily Sqm'].fillna(0)
-    _sv['Days of Stock'] = (_sv['Stock (Sq.m)'] / _sv['Daily Sqm'].replace(0, None)).round(1)
-
-    # Add size/brand from prod
-    if not prod.empty:
-        _sv = _sv.merge(prod[['Product No.','Brand Name','Category','Size']].drop_duplicates('Product No.'),
-                        on='Product No.', how='left')
-
-    # ── REORDER ALERTS ───────────────────────────────────────────────────────
-    _reorder_days = 30
-    _reorder = _sv[(_sv['Daily Sqm'] > 0) & (_sv['Days of Stock'] < _reorder_days)].copy()
-    _reorder = _reorder.sort_values('Days of Stock')
-    _reorder['Cost (Rs)'] = _reorder.apply(
-        lambda r: round(r['Stock (Sq.m)'] * _wac_map.get(str(r['Product No.']).upper(), 0), 0)
-        if _wac_map else None, axis=1)
-
-    # ── DEAD STOCK ───────────────────────────────────────────────────────────
-    _sold_60  = set(_sales[_sales['Date'] >= _today - pd.Timedelta(days=60)]['Product No.'].unique())
-    _sold_90  = set(_sales[_sales['Date'] >= _today - pd.Timedelta(days=90)]['Product No.'].unique())
-    _sold_120 = set(_sales[_sales['Date'] >= _today - pd.Timedelta(days=120)]['Product No.'].unique())
-    _dead = _sv[_sv['Daily Sqm'] == 0].copy()
-    _dead['Last Sale'] = _dead['Product No.'].map(
-        _sales.groupby('Product No.')['Date'].max().dt.strftime('%d-%b-%Y'))
-    _dead['Dead Since'] = _dead['Product No.'].apply(
-        lambda p: '120+ days' if p not in _sold_120 else
-                  ('90+ days' if p not in _sold_90 else
-                  ('60+ days' if p not in _sold_60 else '<60 days')))
-    _dead['Capital Trapped (Rs)'] = _dead.apply(
-        lambda r: round(r['Stock (Sq.m)'] * _wac_map.get(str(r['Product No.']).upper(), 0), 0)
-        if _wac_map else None, axis=1)
-    _dead = _dead.sort_values('Stock (Sq.m)', ascending=False)
-
-    # ── MARGIN EROSION ───────────────────────────────────────────────────────
-    _s90 = _sales[_sales['Date'] >= _today - pd.Timedelta(days=90)].copy()
-    _s90['Profit%'] = (_s90['Profit'] / _s90['SALE'].replace(0, None) * 100).round(2)
-    _prod_avg_margin = _s90.groupby('Product No.')['Profit%'].mean().to_dict()
-
-    _sales2 = _sales.copy()
-    _sales2['Profit%'] = (_sales2['Profit'] / _sales2['SALE'].replace(0, None) * 100).round(2)
-    _sales2['Avg Margin%'] = _sales2['Product No.'].map(_prod_avg_margin)
-    _sales2['Margin Drop'] = _sales2['Avg Margin%'] - _sales2['Profit%']
-    _eroded = _sales2[
-        (_sales2['Date'] >= _today - pd.Timedelta(days=30)) &
-        (_sales2['Margin Drop'] > 10) &
-        (_sales2['SALE'] > 0)
-    ][['Date','Bill No.','Account Name','Product No.','SALE','Profit%','Avg Margin%','Margin Drop']].copy()
-    _eroded = _eroded.sort_values('Margin Drop', ascending=False)
-    _eroded['Date'] = pd.to_datetime(_eroded['Date']).dt.strftime('%d-%b-%Y')
-    _eroded['SALE'] = _eroded['SALE'].apply(lambda x: f"Rs {x:,.0f}")
-
-    # ── CHURN EARLY WARNING ──────────────────────────────────────────────────
-    _cust_sales = _sales.groupby('Account Name').agg(
-        Bills     = ('Bill No.', 'nunique'),
-        First     = ('Date', 'min'),
-        Last      = ('Date', 'max'),
-        Revenue   = ('SALE', 'sum'),
-    ).reset_index()
-    _cust_sales['Tenure Days']    = (_today - _cust_sales['First']).dt.days
-    _cust_sales['Days Since Last'] = (_today - _cust_sales['Last']).dt.days
-    _cust_sales['Avg Gap']        = (_cust_sales['Tenure Days'] / _cust_sales['Bills'].clip(lower=1)).round(0)
-    _cust_sales['Overdue Ratio']  = (_cust_sales['Days Since Last'] / _cust_sales['Avg Gap'].replace(0, None)).round(2)
-    _churn_warn = _cust_sales[
-        (_cust_sales['Bills'] >= 3) &
-        (_cust_sales['Overdue Ratio'] >= 1.5) &
-        (_cust_sales['Days Since Last'] >= 20)
-    ].copy()
-    _churn_warn = _churn_warn.sort_values('Overdue Ratio', ascending=False)
-    _churn_warn['Risk'] = _churn_warn['Overdue Ratio'].apply(
-        lambda x: '🔴 Critical' if x >= 3 else ('🟠 High' if x >= 2 else '🟡 Medium'))
-    _churn_warn['Last Purchase'] = _churn_warn['Last'].dt.strftime('%d-%b-%Y')
-    _churn_warn['Revenue'] = _churn_warn['Revenue'].apply(lambda x: f"Rs {x:,.0f}")
-    _churn_warn['Avg Gap'] = _churn_warn['Avg Gap'].astype(int).astype(str) + ' days'
-    _churn_warn['Days Since Last'] = _churn_warn['Days Since Last'].astype(int)
-
-    # ── PRODUCT RATIONALISATION ──────────────────────────────────────────────
-    _rat = _sv.merge(
-        _s90.groupby('Product No.').agg(
-            Sales90   = ('SALE', 'sum'),
-            Margin90  = ('Profit%', 'mean'),
-        ).reset_index(), on='Product No.', how='left')
-    _rat['Sales90']  = _rat['Sales90'].fillna(0)
-    _rat['Margin90'] = _rat['Margin90'].fillna(0)
-    # Rank: high stock rank + low sales rank + low margin rank → high rationalisation score
-    _rat['StockRank']  = _rat['Stock (Sq.m)'].rank(pct=True) * 100
-    _rat['SalesRank']  = (100 - _rat['Sales90'].rank(pct=True) * 100)   # inverted
-    _rat['MarginRank'] = (100 - _rat['Margin90'].rank(pct=True) * 100)  # inverted
-    _rat['Rationalise Score'] = (_rat['StockRank']*0.4 + _rat['SalesRank']*0.35 + _rat['MarginRank']*0.25).round(1)
-    _rat = _rat[_rat['Stock (Sq.m)'] > 0].sort_values('Rationalise Score', ascending=False).head(30)
-    _rat['Capital (Rs)'] = _rat.apply(
-        lambda r: round(r['Stock (Sq.m)'] * _wac_map.get(str(r['Product No.']).upper(), 0), 0)
-        if _wac_map else None, axis=1)
-    _rat['Recommendation'] = _rat['Rationalise Score'].apply(
-        lambda x: '🔴 Discontinue / Deep Discount' if x >= 80 else
-                  ('🟠 Reduce Orders' if x >= 60 else '🟡 Monitor'))
-
-    # ── GROSS PROFIT BRIDGE ──────────────────────────────────────────────────
-    _this_m  = _today.to_period('M')
-    _prev_m  = (_today - pd.DateOffset(months=1)).to_period('M')
-    _s_m = _sales.copy()
-    _s_m['Month'] = _s_m['Date'].dt.to_period('M')
-    _gp_cur  = _s_m[_s_m['Month'] == _this_m]
-    _gp_prv  = _s_m[_s_m['Month'] == _prev_m]
-
-    def _gp_summary(d):
-        return {
-            'Revenue': d['SALE'].sum(),
-            'GP': d['Profit'].sum(),
-            'Sqm': d['Sq.m'].sum(),
-            'GP%': (d['Profit'].sum() / d['SALE'].sum() * 100) if d['SALE'].sum() > 0 else 0,
-        }
-    _cur_s = _gp_summary(_gp_cur)
-    _prv_s = _gp_summary(_gp_prv)
-
-    _vol_effect  = (_cur_s['Sqm'] - _prv_s['Sqm']) * (_prv_s['GP'] / _prv_s['Sqm'] if _prv_s['Sqm'] > 0 else 0)
-    _mix_rev_diff= _cur_s['Revenue'] - _prv_s['Revenue'] - (_cur_s['Sqm'] - _prv_s['Sqm']) * (_prv_s['Revenue'] / _prv_s['Sqm'] if _prv_s['Sqm'] > 0 else 0)
-    _rate_effect = _cur_s['GP'] - _prv_s['GP'] - _vol_effect
-    _gp_bridge = pd.DataFrame([
-        {'Component': f"GP — {str(_prev_m)}",  'Amount (Rs)': round(_prv_s['GP'], 0)},
-        {'Component': '➕ Volume Effect',        'Amount (Rs)': round(_vol_effect, 0)},
-        {'Component': '➕ Rate / Margin Effect', 'Amount (Rs)': round(_rate_effect, 0)},
-        {'Component': f"= GP — {str(_this_m)}", 'Amount (Rs)': round(_cur_s['GP'], 0)},
-    ])
-
-    # ── SUPPLIER COST DRIFT ──────────────────────────────────────────────────
-    _sup_log = st.session_state.get('supplier_wac', {})
-    _drift_rows = []
-    _sup_batches = st.session_state.get('supplier_log', [])
-    # Use purchase data to estimate cost drift: compare avg purchase rate last 90d vs prior 90d
-    _p_cost = _purch[['Date','Product No.','Rate','Sq.m']].copy()
-    _p_cost['Date'] = pd.to_datetime(_p_cost['Date'])
-    _p_cost = _p_cost[_p_cost['Rate'] > 0]
-    _cut = _today - pd.Timedelta(days=90)
-    _cut2 = _today - pd.Timedelta(days=180)
-    def _wac_period(d, start, end):
-        s = d[(d['Date'] >= start) & (d['Date'] < end)]
-        if s.empty: return None
-        tv = (s['Sq.m'] * s['Rate']).sum()
-        tq = s['Sq.m'].sum()
-        return round(tv/tq, 2) if tq > 0 else None
-    for pno, grp in _p_cost.groupby('Product No.'):
-        c_now  = _wac_period(grp, _cut,  _today)
-        c_prev = _wac_period(grp, _cut2, _cut)
-        if c_now and c_prev and c_prev > 0:
-            drift_pct = round((c_now - c_prev) / c_prev * 100, 1)
-            if abs(drift_pct) >= 3:
-                _drift_rows.append({'Product No.': pno,
-                                    'Cost 90d Ago': c_prev,
-                                    'Cost Now': c_now,
-                                    'Drift %': drift_pct})
-    _drift_df = pd.DataFrame(_drift_rows).sort_values('Drift %', ascending=False) if _drift_rows else pd.DataFrame()
-    if not _drift_df.empty and not prod.empty:
-        _drift_df = _drift_df.merge(prod[['Product No.','Brand Name','Size']].drop_duplicates('Product No.'),
-                                     on='Product No.', how='left')
-
-    # ── PRODUCT AFFINITY ─────────────────────────────────────────────────────
-    _bill_prods = _sales.groupby('Bill No.')['Product No.'].apply(list)
-    _aff_rows = {}
-    for prods in _bill_prods:
-        prods = list(set(prods))
-        for i, a in enumerate(prods):
-            for b in prods[i+1:]:
-                key = tuple(sorted([a, b]))
-                _aff_rows[key] = _aff_rows.get(key, 0) + 1
-    _aff_df = pd.DataFrame(
-        [{'Product A': k[0], 'Product B': k[1], 'Co-Purchases': v}
-         for k, v in _aff_rows.items()]
-    ).sort_values('Co-Purchases', ascending=False).head(30) if _aff_rows else pd.DataFrame()
+    # (all heavy computation is now in _build_ai_insights() cache above)
 
     # ════════════════════════════════════════════════════════════════════
     # RENDER
@@ -6911,180 +6995,72 @@ Total return value across all time: **{_fmt(abs(_total_ret_val))}**
             "These are your missed revenue opportunities."
         )
 
-        try:
-            _s_all  = df[df['Type'] == 'S'].copy()
-            _p_all  = df[df['Type'].isin(['P', 'O.S'])].copy()
+        _missed = _mr_cached.copy() if not _mr_cached.empty else pd.DataFrame()
 
-            if _s_all.empty or _p_all.empty:
-                st.info("Not enough sales or purchase data to compute missed reorders.")
-            else:
-                # ── Sales velocity per product (all time) ────────────────────
-                _s_all['Date'] = pd.to_datetime(_s_all['Date'], errors='coerce')
-                _p_all['Date'] = pd.to_datetime(_p_all['Date'], errors='coerce')
+        if _missed.empty:
+            st.info("Not enough data to compute missed reorders.")
+        else:
+            # ── Summary KPIs ─────────────────────────────────────────────
+            _mr_c1, _mr_c2, _mr_c3, _mr_c4 = st.columns(4)
+            _mr_c1.metric("Never Reordered",   f"{len(_missed):,}")
+            _mr_c2.metric("Est. Missed Revenue",
+                           f"Rs {_missed['Est. Missed Rev (Rs)'].sum():,.0f}")
+            _mr_c3.metric("Avg Days Since Restock",
+                           f"{_missed['Days Since Reorder'].median():.0f}d"
+                           if 'Days Since Reorder' in _missed.columns else "—")
+            _mr_c4.metric("Stable Fast Movers",
+                           f"{(_missed['Demand Pattern']=='🔁 Stable Fast Mover').sum():,}")
 
-                _s_grp = (_s_all.groupby('Product No.')
-                          .agg(
-                              TotalSalesQty=('Qty', 'sum'),
-                              TotalRevenue=('SALE', 'sum'),
-                              SaleDays=('Date', lambda x: (x.max() - x.min()).days + 1),
-                              FirstSale=('Date', 'min'),
-                              LastSale=('Date', 'max'),
-                              BillCount=('Bill No.', 'nunique'),
-                          ).reset_index())
+            st.divider()
 
-                # Daily velocity (all-time)
-                _s_grp['Daily Sqm'] = _s_grp.apply(
-                    lambda r: r['TotalSalesQty'] / max(r['SaleDays'], 1), axis=1
-                )
+            # ── Filters ──────────────────────────────────────────────────
+            _mrf1, _mrf2 = st.columns(2)
+            _mr_pat = _mrf1.multiselect(
+                "Demand Pattern",
+                ['🔁 Stable Fast Mover', '⚡ Volatile Fast Mover'],
+                default=['🔁 Stable Fast Mover', '⚡ Volatile Fast Mover'],
+                key="mr_pat"
+            )
+            _mr_brands = ['All'] + sorted(_missed['Brand Name'].dropna().unique().tolist()) \
+                if 'Brand Name' in _missed.columns else ['All']
+            _mr_brand = _mrf2.selectbox("Brand", _mr_brands, key="mr_brand")
 
-                # Coefficient of Variation to classify demand pattern
-                _cv_map = {}
-                for _pno, _grp in _s_all.groupby('Product No.'):
-                    _weekly = (_grp.set_index('Date').resample('W')['Qty'].sum())
-                    if len(_weekly) >= 4 and _weekly.mean() > 0:
-                        _cv_map[_pno] = _weekly.std() / _weekly.mean()
-                    else:
-                        _cv_map[_pno] = None
+            _missed_f = _missed[_missed['Demand Pattern'].isin(_mr_pat)].copy()
+            if _mr_brand != 'All' and 'Brand Name' in _missed_f.columns:
+                _missed_f = _missed_f[_missed_f['Brand Name'] == _mr_brand]
 
-                _s_grp['CV'] = _s_grp['Product No.'].map(_cv_map)
-                _s_grp['Demand Pattern'] = _s_grp['CV'].apply(
-                    lambda v: '🔁 Stable Fast Mover'   if v is not None and v <= 0.5
-                    else      '⚡ Volatile Fast Mover'  if v is not None and v > 0.5
-                    else      '❓ Insufficient Data'
-                )
+            _missed_f = _missed_f.sort_values('Est. Missed Rev (Rs)', ascending=False)
 
-                # Keep only fast movers (stable or volatile)
-                _fast = _s_grp[_s_grp['Demand Pattern'].isin(
-                    ['🔁 Stable Fast Mover', '⚡ Volatile Fast Mover']
-                )].copy()
+            _mr_show_cols = [c for c in [
+                'Product No.', 'Brand Name', 'Category', 'Size',
+                'Demand Pattern', 'BillCount', 'TotalSalesQty', 'TotalRevenue',
+                'Daily Sqm', 'FirstSale', 'LastSale', 'Days Since Last Sale',
+                'LastPurchase', 'Days Since Reorder', 'Est. Missed Rev (Rs)'
+            ] if c in _missed_f.columns]
 
-                # ── Purchase history per product ─────────────────────────────
-                _p_grp = (_p_all.groupby('Product No.')
-                          .agg(
-                              PurchaseCount=('Bill No.', 'nunique'),
-                              FirstPurchase=('Date', 'min'),
-                              LastPurchase=('Date', 'max'),
-                          ).reset_index())
+            _mr_rename = {
+                'BillCount': 'Bills', 'TotalSalesQty': 'Total Sq.m Sold',
+                'TotalRevenue': 'Revenue (Rs)', 'Daily Sqm': 'Daily Velocity',
+                'FirstSale': 'First Sale', 'LastSale': 'Last Sale',
+                'LastPurchase': 'Last Restocked', 'Days Since Reorder': 'Days Since Restock',
+            }
+            _mr_disp = _missed_f[_mr_show_cols].rename(columns=_mr_rename).copy()
+            for _dc in ['First Sale', 'Last Sale', 'Last Restocked']:
+                if _dc in _mr_disp.columns:
+                    _mr_disp[_dc] = pd.to_datetime(_mr_disp[_dc], errors='coerce').dt.strftime('%d-%b-%Y')
+            for _nc in ['Total Sq.m Sold', 'Revenue (Rs)', 'Daily Velocity', 'Est. Missed Rev (Rs)']:
+                if _nc in _mr_disp.columns:
+                    _mr_disp[_nc] = _mr_disp[_nc].round(1)
 
-                # ── Merge: fast movers + purchase history ────────────────────
-                _mr = _fast.merge(_p_grp, on='Product No.', how='left')
-
-                # "Never Reordered" = only 1 purchase batch ever (or never purchased again
-                # after first, meaning LastPurchase ≈ FirstPurchase within 30 days)
-                _mr['PurchaseCount']  = _mr['PurchaseCount'].fillna(0)
-                _mr['LastPurchase']   = pd.to_datetime(_mr['LastPurchase'], errors='coerce')
-                _mr['FirstPurchase']  = pd.to_datetime(_mr['FirstPurchase'], errors='coerce')
-                _mr['LastSale']       = pd.to_datetime(_mr['LastSale'], errors='coerce')
-
-                _mr['Days Since Reorder'] = (_today - _mr['LastPurchase']).dt.days
-                _mr['Reorder Gap (days)'] = (_mr['LastPurchase'] - _mr['FirstPurchase']).dt.days
-
-                # Flag: never reordered = only 1 purchase event OR gap between first and last
-                # purchase < 30 days (same batch)
-                _mr['Never Reordered'] = (
-                    (_mr['PurchaseCount'] <= 1) |
-                    (_mr['Reorder Gap (days)'] < 30)
-                )
-
-                _missed = _mr[_mr['Never Reordered']].copy()
-
-                # ── Enrich with product metadata ─────────────────────────────
-                if not prod.empty:
-                    _prod_meta = prod[['Product No.', 'Brand Name', 'Category', 'Size']].drop_duplicates('Product No.')
-                    _missed = _missed.merge(_prod_meta, on='Product No.', how='left')
-
-                # ── Estimate missed revenue ──────────────────────────────────
-                # Days from last purchase to today where stock likely ran out
-                # Proxy: if last sale was before today and product still had velocity,
-                # missed days = days since last sale
-                _missed['Days Since Last Sale'] = (_today - _missed['LastSale']).dt.days
-                _missed['Est. Missed Rev (Rs)'] = (
-                    _missed['Daily Sqm'] *
-                    _missed['Days Since Last Sale'].clip(lower=0) *
-                    (_missed['TotalRevenue'] / _missed['TotalSalesQty'].replace(0, None))
-                ).round(0)
-
-                # ── Summary KPIs ─────────────────────────────────────────────
-                _mr_c1, _mr_c2, _mr_c3, _mr_c4 = st.columns(4)
-                _mr_c1.metric("Fast Movers Found",       f"{len(_fast):,}")
-                _mr_c2.metric("Never Reordered",         f"{len(_missed):,}")
-                _mr_c3.metric("Est. Missed Revenue",
-                               f"Rs {_missed['Est. Missed Rev (Rs)'].sum():,.0f}"
-                               if not _missed.empty else "—")
-                _mr_c4.metric("Avg Days Since Restock",
-                               f"{_missed['Days Since Reorder'].median():.0f}d"
-                               if not _missed.empty else "—")
-
-                st.divider()
-
-                # ── Filters ──────────────────────────────────────────────────
-                _mrf1, _mrf2 = st.columns(2)
-                _mr_pat = _mrf1.multiselect(
-                    "Demand Pattern",
-                    ['🔁 Stable Fast Mover', '⚡ Volatile Fast Mover'],
-                    default=['🔁 Stable Fast Mover', '⚡ Volatile Fast Mover'],
-                    key="mr_pat"
-                )
-                _mr_brands = ['All'] + sorted(_missed['Brand Name'].dropna().unique().tolist()) \
-                    if 'Brand Name' in _missed.columns else ['All']
-                _mr_brand = _mrf2.selectbox("Brand", _mr_brands, key="mr_brand")
-
-                _missed_f = _missed[_missed['Demand Pattern'].isin(_mr_pat)].copy()
-                if _mr_brand != 'All' and 'Brand Name' in _missed_f.columns:
-                    _missed_f = _missed_f[_missed_f['Brand Name'] == _mr_brand]
-
-                _missed_f = _missed_f.sort_values('Est. Missed Rev (Rs)', ascending=False)
-
-                # ── Display columns ──────────────────────────────────────────
-                _mr_show_cols = [c for c in [
-                    'Product No.', 'Brand Name', 'Category', 'Size',
-                    'Demand Pattern',
-                    'BillCount', 'TotalSalesQty', 'TotalRevenue',
-                    'Daily Sqm',
-                    'FirstSale', 'LastSale', 'Days Since Last Sale',
-                    'LastPurchase', 'Days Since Reorder',
-                    'Est. Missed Rev (Rs)'
-                ] if c in _missed_f.columns]
-
-                _mr_rename = {
-                    'BillCount':          'Bills',
-                    'TotalSalesQty':      'Total Sq.m Sold',
-                    'TotalRevenue':       'Revenue (Rs)',
-                    'Daily Sqm':          'Daily Velocity',
-                    'FirstSale':          'First Sale',
-                    'LastSale':           'Last Sale',
-                    'LastPurchase':       'Last Restocked',
-                    'Days Since Reorder': 'Days Since Restock',
-                }
-                _mr_disp = _missed_f[_mr_show_cols].rename(columns=_mr_rename).copy()
-
-                # Format dates
-                for _dc in ['First Sale', 'Last Sale', 'Last Restocked']:
-                    if _dc in _mr_disp.columns:
-                        _mr_disp[_dc] = pd.to_datetime(_mr_disp[_dc], errors='coerce').dt.strftime('%d-%b-%Y')
-
-                for _nc in ['Total Sq.m Sold', 'Revenue (Rs)', 'Daily Velocity', 'Est. Missed Rev (Rs)']:
-                    if _nc in _mr_disp.columns:
-                        _mr_disp[_nc] = _mr_disp[_nc].round(1)
-
-                st.dataframe(_mr_disp.reset_index(drop=True), hide_index=True, use_container_width=True)
-
-                if not _mr_disp.empty:
-                    st.download_button(
-                        "📥 Download Missed Reorders",
-                        _missed_f[_mr_show_cols].to_csv(index=False),
-                        "missed_reorders.csv",
-                        key="dl_mr"
-                    )
-
-                st.divider()
-                st.info(
-                    "💡 **How to read this:** These products have demonstrated real demand "
-                    "(stable or volatile fast movers over their sales history) but were never "
-                    "restocked after the first purchase batch. "
-                    "Estimated missed revenue = daily velocity × days since last sale × avg price/sqm. "
-                    "Prioritise by Est. Missed Rev to find the highest-impact restock decisions."
-                )
-
-        except Exception as _mr_err:
-            st.error(f"Could not compute missed reorders: {_mr_err}")
+            st.dataframe(_mr_disp.reset_index(drop=True), hide_index=True, use_container_width=True)
+            if not _mr_disp.empty:
+                st.download_button("📥 Download Missed Reorders",
+                                   _missed_f[_mr_show_cols].to_csv(index=False),
+                                   "missed_reorders.csv", key="dl_mr")
+            st.divider()
+            st.info(
+                "💡 **How to read this:** These products have demonstrated real demand "
+                "(stable or volatile fast movers) but were never restocked after the first "
+                "purchase batch. Estimated missed revenue = daily velocity × days since last "
+                "sale × avg price/sqm. Prioritise by Est. Missed Rev."
+            )
