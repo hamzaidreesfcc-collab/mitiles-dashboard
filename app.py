@@ -754,36 +754,73 @@ def build_pi(_df, _prod):
                     np.where(pi['Cum %'] <= cfg['abc_b_pct'], 'B', 'C'))
     pi['ABC_XYZ'] = pi['ABC'] + pi['XYZ']
 
-    # ── Ghost Performer Detection (vectorised) ────────────────────────────────
-    _sorted = _df.sort_values(['Product No.','Date'])
-    _sorted['_prev_close'] = _sorted.groupby('Product No.')['Closing'].shift(1).fillna(0)
-    _sorted['_stockout_evt'] = (_sorted['Closing'] <= 0) & (_sorted['_prev_close'] > 0)
-    _so_counts = _sorted.groupby('Product No.')['_stockout_evt'].sum()
-    _so_counts = _so_counts[_so_counts > 0]
+    # ── Ghost Performer Detection — purchase-gap method ───────────────────────
+    # A real stockout = gap of 30+ days between last sale and next purchase.
+    # This avoids false positives from ERP Closing=0 posting artifacts.
+    # Qualifies only if: 2+ restock events AND true velocity >= 2× regular velocity
+    # AND currently out of stock (Current Stock Sqm <= 0) — i.e. actionable now.
 
-    if len(_so_counts):
-        _ghost_sub = _df[_df['Product No.'].isin(_so_counts.index)].copy()
-        _ghost_sub = _ghost_sub.sort_values(['Product No.','Date'])
-        _ghost_sub['_prev_close'] = _ghost_sub.groupby('Product No.')['Closing'].shift(1).fillna(0)
-        _ghost_sub['_was_in_stock'] = _ghost_sub['_prev_close'] > 0
-        _in_stock_sal = _ghost_sub[(_ghost_sub['Type']=='S') & (_ghost_sub['_was_in_stock'])]
-        _in_stock_sal_agg = _in_stock_sal.groupby('Product No.')['Sq.m'].sum()
-        _in_stock_days_agg = (_ghost_sub[_ghost_sub['Closing']>0]
-                               .groupby('Product No.')['Date'].nunique().clip(lower=1))
-        _true_vel = (_in_stock_sal_agg / _in_stock_days_agg * 30).fillna(0)
-        _last_sal = _sal_all.groupby('Product No.')['Date'].max()
-        _ds_ghost  = ((today - _last_sal).dt.days).clip(lower=1)
-        _ghost_df = pd.DataFrame({
-            'Product No.':       _so_counts.index,
-            'Stockout Count':    _so_counts.values,
-        }).set_index('Product No.')
-        _ghost_df['True Velocity']       = _true_vel.reindex(_ghost_df.index).fillna(0)
-        _ghost_df['Ghost Score']         = (_ghost_df['True Velocity'] * _ghost_df['Stockout Count'] /
-                                            _ds_ghost.reindex(_ghost_df.index).fillna(1) * 100).round(2)
-        _ghost_df['Suggested Reorder Sqm'] = (_ghost_df['True Velocity'] * 4.5).round(1)
-        _ghost_df = _ghost_df.reset_index()
-    else:
-        _ghost_df = pd.DataFrame(columns=['Product No.','True Velocity','Stockout Count','Ghost Score','Suggested Reorder Sqm'])
+    _g_sal = _sal_all.groupby('Product No.').agg(
+        _first_sale=('Date','min'), _last_sale=('Date','max'),
+        _total_sqm=('Sq.m','sum'), _sale_days=('Date','nunique')
+    )
+    _g_pur = _pur_all.groupby('Product No.').agg(
+        _pur_dates=('Date', list), _pur_count=('Bill No.','nunique')
+    )
+    _ghost_rows = []
+    for _pno, _pr in _g_pur.iterrows():
+        if _pno not in _g_sal.index: continue
+        if _pr['_pur_count'] < 2: continue          # need at least 2 restocks
+        _sr = _g_sal.loc[_pno]
+        _pur_dates = sorted(pd.to_datetime(_pr['_pur_dates']))
+
+        # Find stockout gaps: periods between last sale before a restock and that restock date
+        _sal_rows = _sal_all[_sal_all['Product No.']==_pno].sort_values('Date')
+        _stockout_gaps = []
+        for _pd in _pur_dates[1:]:                  # skip first purchase
+            # sales before this restock
+            _sales_before = _sal_rows[_sal_rows['Date'] < _pd]
+            if _sales_before.empty: continue
+            _last_s = _sales_before['Date'].max()
+            _gap = (_pd - _last_s).days
+            if _gap >= 30:                           # real stockout gap
+                _stockout_gaps.append(_gap)
+
+        if len(_stockout_gaps) < 1: continue        # no real stockouts found
+
+        # True velocity = sales per day during stocked periods only
+        # Stocked days = total days minus sum of stockout gaps
+        _total_days = max((_sr['_last_sale'] - _sr['_first_sale']).days, 1)
+        _stocked_days = max(_total_days - sum(_stockout_gaps), 1)
+        _true_vel = _sr['_total_sqm'] / _stocked_days * 30
+
+        # Regular velocity for comparison
+        _di = max((today - _sr['_first_sale']).days, 1)
+        _reg_vel = _sr['_total_sqm'] / _di * 30
+
+        # Only flag if true velocity is meaningfully higher than regular velocity
+        if _true_vel < 2 or _true_vel < _reg_vel * 1.5: continue
+
+        # Current stock — check if out of stock now
+        _cs_now = pi.loc[pi['Product No.']==_pno, 'Current Stock Sqm'].values
+        _cs_now = float(_cs_now[0]) if len(_cs_now) else 0
+
+        _ds_now = max((today - _sr['_last_sale']).days, 1)
+        _ghost_score = round(_true_vel * len(_stockout_gaps) / _ds_now * 100, 2)
+
+        _ghost_rows.append({
+            'Product No.':          _pno,
+            'True Velocity':        round(_true_vel, 1),
+            'Stockout Count':       len(_stockout_gaps),
+            'Avg Stockout Gap (d)': round(sum(_stockout_gaps)/len(_stockout_gaps), 0),
+            'Ghost Score':          _ghost_score,
+            'Suggested Reorder Sqm': round(_true_vel * 3, 1),
+            'Currently Out':        _cs_now <= 0,
+        })
+
+    _ghost_df = pd.DataFrame(_ghost_rows) if _ghost_rows else pd.DataFrame(
+        columns=['Product No.','True Velocity','Stockout Count',
+                 'Avg Stockout Gap (d)','Ghost Score','Suggested Reorder Sqm','Currently Out'])
 
     pi = pi.merge(_ghost_df[['Product No.','True Velocity','Stockout Count','Ghost Score','Suggested Reorder Sqm']],
                   on='Product No.', how='left')
