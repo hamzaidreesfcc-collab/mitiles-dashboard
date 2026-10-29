@@ -594,227 +594,230 @@ def load_data(path):
 def build_pi(_df, _prod):
     cfg   = get_config()
     today = pd.Timestamp.today().normalize()
-    results = []
-    for prod_no, g in _df.groupby('Product No.'):
-        pur = g[g['Type'].isin(['P','O.S'])]
-        sal = g[g['Type'] == 'S']
-        ret = g[g['Type'].isin(['S.R','P.R','D.S'])]
-        fp  = pur['Date'].min() if len(pur)>0 else pd.NaT
-        ls  = sal['Date'].max() if len(sal)>0 else pd.NaT
-        di  = int((today-pd.Timestamp(fp)).days) if pd.notna(fp) else None
-        ds  = int((today-pd.Timestamp(ls)).days) if pd.notna(ls) else None
-        cs  = g.sort_values('Date').iloc[-1]['Closing'] if len(g)>0 else 0
-        ts  = sal['Sq.m'].sum()
-        ns  = max(0, ts - ret['Sq.m'].sum())
-        s30 = sal[sal['Date']>=today-timedelta(30)]['Sq.m'].sum()
-        s90 = sal[sal['Date']>=today-timedelta(90)]['Sq.m'].sum()
-        s180= sal[sal['Date']>=today-timedelta(180)]['Sq.m'].sum()
-        s360= sal[sal['Date']>=today-timedelta(360)]['Sq.m'].sum()
-        vel = (ns/di*30) if di and di>0 else 0
-        psq = pur['Sq.m'].sum(); pval= (pur['Sq.m']*pur['Rate']).sum()
-        wac = pval/psq if psq>0 else 0
-        sv  = max(0,cs)*wac
-        mos = (cs/vel) if vel>0 and cs>0 else 0
-        sdays= sal['Date'].dt.date.nunique() if len(sal)>0 else 0
-        freq = sdays/di if di and di>0 else 0
-        avd  = ns/di if di and di>0 else 0
-        std  = sal['Sq.m'].std() if len(sal)>1 else 0
-        cv   = std/avd if avd>0 else 0
-        rev  = sal['SALE'].sum(); erpp=sal['Profit'].sum(); actp=sal['Actual Profit'].sum()
-        em   = (erpp/rev*100) if rev>0 else 0; am=(actp/rev*100) if rev>0 else 0
-        unique_customers = sal['Account Name'].nunique() if len(sal)>0 else 0
-        vel_norm  = min(vel/cfg['rs_vel_base']*100,  100) if vel>0  else 0
-        cust_norm = min(unique_customers/cfg['rs_cust_base']*100, 100) if unique_customers>0 else 0
-        freq_norm = min(freq/cfg['rs_freq_base']*100, 100) if freq>0 else 0
-        st_norm   = min((ns/max(psq,1))*100, 100)
-        reorder_score = round(vel_norm*cfg['rs_vel_weight'] + cust_norm*cfg['rs_cust_weight'] + freq_norm*cfg['rs_freq_weight'] + st_norm*cfg['rs_st_weight'], 1)
-        if ns<=0:              dp='No Sales / Returns Only'
-        elif freq>=cfg['dp_fast_freq'] and cv<cfg['dp_cv_threshold']: dp='Stable Fast Mover'
-        elif freq>=cfg['dp_fast_freq']:     dp='Volatile Fast Mover'
-        elif cfg['dp_slow_freq']<=freq<cfg['dp_fast_freq'] and cv<cfg['dp_cv_threshold']: dp='Slow Stable'
-        elif cfg['dp_slow_freq']<=freq<cfg['dp_fast_freq']:  dp='Erratic Demand'
-        else:                  dp='Dead / Negligible'
-        # Tail Stock detection — sold well but tiny remainder off display
-        _psq_ts = pur['Sq.m'].sum()
-        _ts_ts  = sal['Sq.m'].sum()
-        _st_ts  = _ts_ts/_psq_ts if _psq_ts>0 else 0
-        _rem_ts = max(0,cs)/_psq_ts if _psq_ts>0 else 1
-        _vdrop  = 0.0
-        if len(sal)>=4:
-            _ss  = sal.sort_values('Date')
-            _spl = int(len(_ss)*0.7)
-            _d1  = max((_ss.iloc[_spl-1]['Date']-_ss.iloc[0]['Date']).days,1)
-            _d2  = max((_ss.iloc[-1]['Date']-_ss.iloc[_spl]['Date']).days,1)
-            _v1  = _ss.iloc[:_spl]['Sq.m'].sum()/_d1*30
-            _v2  = _ss.iloc[_spl:]['Sq.m'].sum()/_d2*30
-            _vdrop = (_v1-_v2)/_v1*100 if _v1>0 else 0
-        _is_tail = (_st_ts>0.70 and _rem_ts<0.25 and _vdrop>60
-                    and ds is not None and ds>90)
 
-        if cs<=0:              inv='Out of Stock'
-        elif ds is None:       inv='No Sales'
-        elif ds<=cfg['inv_active_days']:    inv='Active'
-        elif ds<=cfg['inv_slow_days']:      inv='Slow'
-        elif ds<=cfg['inv_at_risk_days']:   inv='At Risk'
-        elif ds<=cfg['inv_critical_days']:  inv='Critical'
-        elif _is_tail:         inv='Tail Stock'
-        else:                  inv='Dead Stock'
-        if cs<=0:              sh='No Stock'
-        elif mos<=cfg['sh_reorder_months']:  sh='Reorder Now'
-        elif mos<=cfg['sh_healthy_months']:  sh='Healthy'
-        elif mos<=cfg['sh_overstock_months']:sh='Overstocked'
-        else:                  sh='Dead Stock'
-        total_months = _df['Date'].dt.to_period('M').nunique()
-        cons = sdays/total_months*100 if total_months>0 else 0
-        xyz  = 'X' if cons>=cfg['xyz_x_pct'] else ('Y' if cons>=cfg['xyz_y_pct'] else 'Z')
-        results.append({'Product No.':prod_no,'Velocity Drop %':round(_vdrop,1),'First Purchase Date':fp.date() if pd.notna(fp) else None,
-            'Last Sale Date':ls.date() if pd.notna(ls) else None,'Days in Inventory':di,
-            'Days Since Last Sale':ds,'Total Sales Sqm':round(ts,2),'Net Sales Sqm':round(ns,2),
-            'Sales Last 30 Days':round(s30,2),'Sales Last 90 Days':round(s90,2),
-            'Sales Last 180 Days':round(s180,2),'Sales Last 360 Days':round(s360,2),
-            'Sales Velocity/Month':round(vel,2),'Current Stock Sqm':round(cs,2),
-            'WAC Rate':round(wac,2),'Stock Value PKR':round(sv,2),'Months of Stock':round(mos,2),
-            'Total Revenue':round(rev,2),'ERP Profit':round(erpp,2),'Actual Profit':round(actp,2),
-            'ERP Margin %':round(em,2),'Actual Margin %':round(am,2),
-            'Demand Pattern':dp,'Inventory Status':inv,'Stock Health':sh,'XYZ':xyz,
-            'Consistency %':round(cons,1),'Reorder Score':reorder_score})
-    pi = pd.DataFrame(results)
-    pi = pi.merge(_prod[['Product No.','Brand Name','Category','Sub-Category','Size','Company Name','Sq.m/Box']], on='Product No.', how='left')
-    pi = pi.sort_values('Total Revenue', ascending=False)
-    pi['Cum %'] = pi['Total Revenue'].cumsum()/pi['Total Revenue'].sum()*100
-    pi['ABC']   = pi['Cum %'].apply(lambda x: 'A' if x<=cfg['abc_a_pct'] else ('B' if x<=cfg['abc_b_pct'] else 'C'))
-    pi['ABC_XYZ']= pi['ABC'] + pi['XYZ']
-    # ── Ghost Performer Detection ────────────────────────────
-    ghost_rows = []
-    for _pno, _g in _df.groupby('Product No.'):
-        _g = _g.sort_values('Date')
-        _sal = _g[_g['Type']=='S']
-        _pur = _g[_g['Type'].isin(['P','O.S'])]
-        if len(_sal)==0 or len(_pur)==0: continue
-        _cs = _g.iloc[-1]['Closing']
-        _ls = _sal['Date'].max() if len(_sal)>0 else pd.NaT
-        _ds = int((today - _ls).days) if pd.notna(_ls) else 9999
-        # Count stockout events
-        _closings = _g['Closing'].values
-        _so_count = sum(1 for i in range(1,len(_closings))
-                       if _closings[i]<=0 and _closings[i-1]>0)
-        if _so_count == 0: continue
-        # True velocity during in-stock periods
-        _g2 = _g.copy()
-        _g2['was_in_stock'] = _g2['Closing'].shift(1).fillna(0) > 0
-        _in_stock_sales = _g2[(_g2['Type']=='S')&(_g2['was_in_stock'])]
-        _in_stock_days  = max(_g2[_g2['Closing']>0]['Date'].nunique(), 1)
-        _true_vel = _in_stock_sales['Sq.m'].sum() / _in_stock_days * 30
-        _ghost_score = round(_true_vel * _so_count / max(_ds, 1) * 100, 2)
-        ghost_rows.append({
-            'Product No.': _pno,
-            'True Velocity': round(_true_vel, 1),
-            'Stockout Count': _so_count,
-            'Days Since Last Sale': _ds,
-            'Ghost Score': _ghost_score,
-            'Suggested Reorder Sqm': round(_true_vel * 3 * 1.5, 1),
-            'Current Stock': round(_cs, 2)
-        })
-    ghost_df = pd.DataFrame(ghost_rows) if ghost_rows else pd.DataFrame(
-        columns=['Product No.','True Velocity','Stockout Count',
-                 'Days Since Last Sale','Ghost Score','Suggested Reorder Sqm','Current Stock'])
-    pi = pi.merge(ghost_df[['Product No.','True Velocity','Stockout Count',
-                             'Ghost Score','Suggested Reorder Sqm']],
+    # ── Split by type once ───────────────────────────────────────────────────
+    _sal_all = _df[_df['Type'] == 'S'].copy()
+    _pur_all = _df[_df['Type'].isin(['P', 'O.S'])].copy()
+    _ret_all = _df[_df['Type'].isin(['S.R', 'P.R', 'D.S'])].copy()
+
+    # ── Vectorised aggregations ──────────────────────────────────────────────
+    _pur_agg = _pur_all.groupby('Product No.').agg(
+        FirstPurchaseDate=('Date', 'min'),
+        TotalPurchasedSqm=('Sq.m', 'sum'),
+        TotalPurchaseValue=('Sq.m', lambda x: (x * _pur_all.loc[x.index, 'Rate']).sum()),
+    ).reset_index()
+
+    _sal_agg = _sal_all.groupby('Product No.').agg(
+        LastSaleDate=('Date', 'max'),
+        TotalSalesSqm=('Sq.m', 'sum'),
+        TotalRevenue=('SALE', 'sum'),
+        ERPProfit=('Profit', 'sum'),
+        ActualProfit=('Actual Profit', 'sum'),
+        SaleDaysCount=('Date', lambda x: x.dt.date.nunique()),
+        UniqueCustomers=('Account Name', 'nunique'),
+        SaleStd=('Sq.m', 'std'),
+    ).reset_index()
+
+    _ret_agg = _ret_all.groupby('Product No.')['Sq.m'].sum().reset_index()
+    _ret_agg.columns = ['Product No.', 'ReturnSqm']
+
+    # Period-windowed sales
+    for _days, _col in [(30,'S30'), (90,'S90'), (180,'S180'), (360,'S360')]:
+        _cut = today - pd.Timedelta(days=_days)
+        _w = _sal_all[_sal_all['Date'] >= _cut].groupby('Product No.')['Sq.m'].sum().reset_index()
+        _w.columns = ['Product No.', _col]
+        _sal_agg = _sal_agg.merge(_w, on='Product No.', how='left')
+    for _col in ['S30','S90','S180','S360']:
+        _sal_agg[_col] = _sal_agg[_col].fillna(0)
+
+    # Current stock = last Closing value per product
+    _cs_df = (_df.sort_values('Date').groupby('Product No.')['Closing'].last().reset_index())
+    _cs_df.columns = ['Product No.', 'CurrentStock']
+
+    # ── Merge everything ─────────────────────────────────────────────────────
+    pi = _pur_agg.merge(_sal_agg, on='Product No.', how='outer')
+    pi = pi.merge(_ret_agg,       on='Product No.', how='left')
+    pi = pi.merge(_cs_df,         on='Product No.', how='left')
+    for _c in ['TotalPurchasedSqm','TotalPurchaseValue','TotalSalesSqm','TotalRevenue',
+               'ERPProfit','ActualProfit','SaleDaysCount','UniqueCustomers','ReturnSqm','CurrentStock']:
+        pi[_c] = pi[_c].fillna(0)
+
+    # ── Derived columns (vectorised) ─────────────────────────────────────────
+    pi['DaysInInventory']    = (today - pi['FirstPurchaseDate']).dt.days
+    pi['DaysSinceLastSale']  = (today - pi['LastSaleDate']).dt.days
+    pi['NetSalesSqm']        = (pi['TotalSalesSqm'] - pi['ReturnSqm']).clip(lower=0)
+    pi['WAC Rate']           = (pi['TotalPurchaseValue'] / pi['TotalPurchasedSqm'].replace(0, None)).fillna(0)
+    pi['Current Stock Sqm']  = pi['CurrentStock'].clip(lower=0)
+    pi['Stock Value PKR']    = (pi['Current Stock Sqm'] * pi['WAC Rate']).round(2)
+    pi['Sales Velocity/Month'] = (pi['NetSalesSqm'] / pi['DaysInInventory'].replace(0, None) * 30).fillna(0).round(2)
+    pi['Months of Stock']    = (pi['Current Stock Sqm'] / pi['Sales Velocity/Month'].replace(0, None)).fillna(0).round(2)
+    pi['ERP Margin %']       = (pi['ERPProfit'] / pi['TotalRevenue'].replace(0, None) * 100).fillna(0).round(2)
+    pi['Actual Margin %']    = (pi['ActualProfit'] / pi['TotalRevenue'].replace(0, None) * 100).fillna(0).round(2)
+    _avd = pi['NetSalesSqm'] / pi['DaysInInventory'].replace(0, None)
+    pi['SaleCV']             = (pi['SaleStd'].fillna(0) / _avd.replace(0, None)).fillna(0)
+    _freq_raw                = pi['SaleDaysCount'] / pi['DaysInInventory'].replace(0, None)
+    pi['Freq']               = _freq_raw.fillna(0)
+    _total_months            = _df['Date'].dt.to_period('M').nunique()
+    pi['Consistency %']      = (pi['SaleDaysCount'] / max(_total_months, 1) * 100).round(1)
+
+    # ── Demand Pattern ───────────────────────────────────────────────────────
+    _cond_fast = pi['Freq'] >= cfg['dp_fast_freq']
+    _cond_slow = (pi['Freq'] >= cfg['dp_slow_freq']) & ~_cond_fast
+    _cond_low_cv = pi['SaleCV'] < cfg['dp_cv_threshold']
+    pi['Demand Pattern'] = np.where(pi['NetSalesSqm'] <= 0, 'No Sales / Returns Only',
+                           np.where(_cond_fast & _cond_low_cv, 'Stable Fast Mover',
+                           np.where(_cond_fast, 'Volatile Fast Mover',
+                           np.where(_cond_slow & _cond_low_cv, 'Slow Stable',
+                           np.where(_cond_slow, 'Erratic Demand', 'Dead / Negligible')))))
+
+    # ── XYZ ─────────────────────────────────────────────────────────────────
+    pi['XYZ'] = np.where(pi['Consistency %'] >= cfg['xyz_x_pct'], 'X',
+                np.where(pi['Consistency %'] >= cfg['xyz_y_pct'], 'Y', 'Z'))
+
+    # ── Reorder Score ────────────────────────────────────────────────────────
+    _vel_n  = (pi['Sales Velocity/Month'] / cfg['rs_vel_base']  * 100).clip(upper=100)
+    _cust_n = (pi['UniqueCustomers']       / cfg['rs_cust_base'] * 100).clip(upper=100)
+    _freq_n = (pi['Freq']                 / cfg['rs_freq_base'] * 100).clip(upper=100)
+    _st_n   = (pi['NetSalesSqm'] / pi['TotalPurchasedSqm'].replace(0,1) * 100).clip(upper=100)
+    pi['Reorder Score'] = (_vel_n*cfg['rs_vel_weight'] + _cust_n*cfg['rs_cust_weight'] +
+                           _freq_n*cfg['rs_freq_weight'] + _st_n*cfg['rs_st_weight']).round(1)
+
+    # ── Velocity Drop % (tail stock detection) — vectorised per product ──────
+    # Approximate: compare velocity in first 70% of sale history vs last 30%
+    def _vdrop_batch(grp):
+        if len(grp) < 4: return 0.0
+        _ss = grp.sort_values('Date')
+        _spl = int(len(_ss)*0.7)
+        _d1 = max((_ss.iloc[_spl-1]['Date']-_ss.iloc[0]['Date']).days, 1)
+        _d2 = max((_ss.iloc[-1]['Date']-_ss.iloc[_spl]['Date']).days, 1)
+        _v1 = _ss.iloc[:_spl]['Sq.m'].sum()/_d1*30
+        _v2 = _ss.iloc[_spl:]['Sq.m'].sum()/_d2*30
+        return round((_v1-_v2)/_v1*100, 1) if _v1>0 else 0.0
+
+    _vdrop_s = _sal_all.groupby('Product No.').apply(_vdrop_batch)
+    pi['Velocity Drop %'] = pi['Product No.'].map(_vdrop_s).fillna(0)
+
+    # ── Sell Through % ───────────────────────────────────────────────────────
+    pi['Sell Through %'] = (pi['TotalSalesSqm'] / pi['TotalPurchasedSqm'].replace(0, None) * 100).fillna(0).round(1)
+
+    # ── Tail Stock flag ──────────────────────────────────────────────────────
+    _is_tail = (
+        (pi['Sell Through %'] > 70) &
+        (pi['Current Stock Sqm'] / pi['TotalPurchasedSqm'].replace(0,1) < 0.25) &
+        (pi['Velocity Drop %'] > 60) &
+        (pi['DaysSinceLastSale'] > 90)
+    )
+
+    # ── Inventory Status ─────────────────────────────────────────────────────
+    _ds = pi['DaysSinceLastSale']
+    _cs = pi['Current Stock Sqm']
+    pi['Inventory Status'] = np.where(_cs <= 0, 'Out of Stock',
+                             np.where(pi['LastSaleDate'].isna(), 'No Sales',
+                             np.where(_ds <= cfg['inv_active_days'],   'Active',
+                             np.where(_ds <= cfg['inv_slow_days'],     'Slow',
+                             np.where(_ds <= cfg['inv_at_risk_days'],  'At Risk',
+                             np.where(_ds <= cfg['inv_critical_days'], 'Critical',
+                             np.where(_is_tail, 'Tail Stock', 'Dead Stock')))))))
+
+    # ── Stock Health ─────────────────────────────────────────────────────────
+    _mos = pi['Months of Stock']
+    pi['Stock Health'] = np.where(_cs <= 0, 'No Stock',
+                         np.where(_mos <= cfg['sh_reorder_months'],  'Reorder Now',
+                         np.where(_mos <= cfg['sh_healthy_months'],  'Healthy',
+                         np.where(_mos <= cfg['sh_overstock_months'],'Overstocked', 'Dead Stock'))))
+
+    # ── Rename to legacy column names ────────────────────────────────────────
+    pi = pi.rename(columns={
+        'FirstPurchaseDate':   'First Purchase Date',
+        'LastSaleDate':        'Last Sale Date',
+        'DaysInInventory':     'Days in Inventory',
+        'DaysSinceLastSale':   'Days Since Last Sale',
+        'TotalSalesSqm':       'Total Sales Sqm',
+        'NetSalesSqm':         'Net Sales Sqm',
+        'S30': 'Sales Last 30 Days', 'S90': 'Sales Last 90 Days',
+        'S180':'Sales Last 180 Days','S360':'Sales Last 360 Days',
+        'TotalRevenue':        'Total Revenue',
+        'ERPProfit':           'ERP Profit',
+        'ActualProfit':        'Actual Profit',
+        'CurrentStock':        'Current Stock Sqm_raw',
+    })
+    pi['Current Stock Sqm']    = pi['Current Stock Sqm']
+    pi['WAC Rate']             = pi['WAC Rate'].round(2)
+    pi['Stock Value PKR']      = pi['Stock Value PKR'].round(2)
+
+    # ── Merge product metadata ────────────────────────────────────────────────
+    pi = pi.merge(_prod[['Product No.','Brand Name','Category','Sub-Category','Size','Company Name','Sq.m/Box']],
                   on='Product No.', how='left')
-    pi['Ghost Score']         = pi['Ghost Score'].fillna(0)
-    pi['True Velocity']       = pi['True Velocity'].fillna(0)
-    pi['Stockout Count']      = pi['Stockout Count'].fillna(0)
-    pi['Suggested Reorder Sqm'] = pi['Suggested Reorder Sqm'].fillna(0)
+    pi = pi.sort_values('Total Revenue', ascending=False)
+    pi['Cum %']   = pi['Total Revenue'].cumsum() / pi['Total Revenue'].sum() * 100
+    pi['ABC']     = np.where(pi['Cum %'] <= cfg['abc_a_pct'], 'A',
+                    np.where(pi['Cum %'] <= cfg['abc_b_pct'], 'B', 'C'))
+    pi['ABC_XYZ'] = pi['ABC'] + pi['XYZ']
 
-    purch2  = _df[_df['Type'].isin(['P','O.S'])].groupby('Product No.')['Sq.m'].sum().reset_index()
-    purch2.columns=['Product No.','Total Purchased']
-    sold2   = _df[_df['Type']=='S'].groupby('Product No.')['Sq.m'].sum().reset_index()
-    sold2.columns=['Product No.','Total Sold']
-    str2    = purch2.merge(sold2, on='Product No.', how='left').fillna(0)
-    str2['Sell Through %'] = (str2['Total Sold']/str2['Total Purchased']*100).round(1)
-    pi = pi.merge(str2[['Product No.','Sell Through %']], on='Product No.', how='left')
+    # ── Ghost Performer Detection (vectorised) ────────────────────────────────
+    _sorted = _df.sort_values(['Product No.','Date'])
+    _sorted['_prev_close'] = _sorted.groupby('Product No.')['Closing'].shift(1).fillna(0)
+    _sorted['_stockout_evt'] = (_sorted['Closing'] <= 0) & (_sorted['_prev_close'] > 0)
+    _so_counts = _sorted.groupby('Product No.')['_stockout_evt'].sum()
+    _so_counts = _so_counts[_so_counts > 0]
 
-    # ── ML MODEL 2: Dead Stock Early Warning ──────────────────
-    try:
-        from sklearn.ensemble import GradientBoostingClassifier
-        from sklearn.preprocessing import LabelEncoder
-        import warnings; warnings.filterwarnings('ignore')
+    if len(_so_counts):
+        _ghost_sub = _df[_df['Product No.'].isin(_so_counts.index)].copy()
+        _ghost_sub = _ghost_sub.sort_values(['Product No.','Date'])
+        _ghost_sub['_prev_close'] = _ghost_sub.groupby('Product No.')['Closing'].shift(1).fillna(0)
+        _ghost_sub['_was_in_stock'] = _ghost_sub['_prev_close'] > 0
+        _in_stock_sal = _ghost_sub[(_ghost_sub['Type']=='S') & (_ghost_sub['_was_in_stock'])]
+        _in_stock_sal_agg = _in_stock_sal.groupby('Product No.')['Sq.m'].sum()
+        _in_stock_days_agg = (_ghost_sub[_ghost_sub['Closing']>0]
+                               .groupby('Product No.')['Date'].nunique().clip(lower=1))
+        _true_vel = (_in_stock_sal_agg / _in_stock_days_agg * 30).fillna(0)
+        _last_sal = _sal_all.groupby('Product No.')['Date'].max()
+        _ds_ghost  = ((today - _last_sal).dt.days).clip(lower=1)
+        _ghost_df = pd.DataFrame({
+            'Product No.':       _so_counts.index,
+            'Stockout Count':    _so_counts.values,
+        }).set_index('Product No.')
+        _ghost_df['True Velocity']       = _true_vel.reindex(_ghost_df.index).fillna(0)
+        _ghost_df['Ghost Score']         = (_ghost_df['True Velocity'] * _ghost_df['Stockout Count'] /
+                                            _ds_ghost.reindex(_ghost_df.index).fillna(1) * 100).round(2)
+        _ghost_df['Suggested Reorder Sqm'] = (_ghost_df['True Velocity'] * 4.5).round(1)
+        _ghost_df = _ghost_df.reset_index()
+    else:
+        _ghost_df = pd.DataFrame(columns=['Product No.','True Velocity','Stockout Count','Ghost Score','Suggested Reorder Sqm'])
 
-        feat_rows = []
-        for _, row in pi.iterrows():
-            di   = row['Days in Inventory'] or 0
-            ds   = row['Days Since Last Sale'] or di
-            vel  = row['Sales Velocity/Month']
-            freq = row['Consistency %'] / 100
-            cv_val = 0
-            if row['Net Sales Sqm'] > 0 and di > 0:
-                avd = row['Net Sales Sqm'] / di
-                sal_g = _df[(_df['Product No.']==row['Product No.'])&(_df['Type']=='S')]['Sq.m']
-                cv_val = min(sal_g.std() / avd if avd > 0 and len(sal_g)>1 else 0, 10)
-            feat_rows.append({
-                'Product No.': row['Product No.'],
-                'vel':   vel,
-                'freq':  freq,
-                'cv':    cv_val,
-                'st':    row['Sell Through %'] / 100 if pd.notna(row['Sell Through %']) else 0,
-                'wac':   row['WAC Rate'],
-                'di':    di,
-                'psq':   row['Total Revenue'] / row['WAC Rate'] if row['WAC Rate'] > 0 else 0,
-                'cat':   str(row.get('Category','Unknown')),
-                'brand': str(row.get('Brand Name','Unknown')),
-                'is_dead': 1 if (row['Inventory Status'] == 'Dead Stock' and row['Current Stock Sqm'] > 0) else 0
-            })
+    pi = pi.merge(_ghost_df[['Product No.','True Velocity','Stockout Count','Ghost Score','Suggested Reorder Sqm']],
+                  on='Product No.', how='left')
+    for _c in ['Ghost Score','True Velocity','Stockout Count','Suggested Reorder Sqm']:
+        pi[_c] = pi[_c].fillna(0)
 
-        feat_df = pd.DataFrame(feat_rows).fillna(0)
-        le_cat   = LabelEncoder(); le_brand = LabelEncoder()
-        feat_df['cat_enc']   = le_cat.fit_transform(feat_df['cat'])
-        feat_df['brand_enc'] = le_brand.fit_transform(feat_df['brand'])
+    # ── Dead Stock Risk — rule-based (replaces slow ML model) ────────────────
+    # Score = weighted combination of days-since-sale, sell-through, velocity, months-of-stock
+    _dsr = (
+        (pi['Days Since Last Sale'].fillna(999) / 365 * 40).clip(upper=40) +
+        ((1 - (pi['Sell Through %'].fillna(0) / 100)) * 20).clip(upper=20) +
+        ((1 - (pi['Sales Velocity/Month'] / (pi['Sales Velocity/Month'].max() or 1))) * 20).clip(upper=20) +
+        ((pi['Months of Stock'] / 24).clip(upper=1) * 20)
+    ).round(1)
+    pi['Dead Stock Risk %'] = _dsr.clip(0, 100)
+    pi['Risk Label'] = np.where(_dsr >= 70, '🔴 High',
+                       np.where(_dsr >= 40, '🟡 Medium', '🟢 Low'))
 
-        X = feat_df[['vel','freq','cv','st','wac','di','psq','cat_enc','brand_enc']].values
-        y = feat_df['is_dead'].values
-
-        if y.sum() > 10 and (y==0).sum() > 10:
-            gb = GradientBoostingClassifier(n_estimators=100, max_depth=4,
-                                            random_state=42, subsample=0.8)
-            gb.fit(X, y)
-            probs = gb.predict_proba(X)[:,1]
-            feat_df['Dead Stock Risk %'] = (probs * 100).round(1)
-            pi = pi.merge(feat_df[['Product No.','Dead Stock Risk %']], on='Product No.', how='left')
-            pi['Dead Stock Risk %'] = pi['Dead Stock Risk %'].fillna(0)
-            pi['Risk Label'] = pi['Dead Stock Risk %'].apply(
-                lambda x: '🔴 High' if x>=70 else ('🟡 Medium' if x>=40 else '🟢 Low'))
-        else:
-            pi['Dead Stock Risk %'] = 0.0
-            pi['Risk Label'] = '🟢 Low'
-    except Exception as e:
-        pi['Dead Stock Risk %'] = 0.0
-        pi['Risk Label'] = '—'
-
-    # ── MODEL 4: Smart Reorder Multiplier ────────────────────
-    try:
-        monthly_sales = _df[_df['Type']=='S'].copy()
-        monthly_sales['Month_ts'] = monthly_sales['Date'].dt.to_period('M').dt.to_timestamp()
-        monthly_agg = monthly_sales.groupby(['Product No.','Month_ts'])['Sq.m'].sum().reset_index()
-        mult_rows = []
-        for prod_no, g in monthly_agg.groupby('Product No.'):
-            if len(g) < 4: continue
-            vals = g['Sq.m'].values
-            mean_v = vals.mean()
-            cv_m = np.std(vals)/mean_v if mean_v>0 else 0
-            if cv_m < 0.5:   mult = 2.0
-            elif cv_m < 1.5: mult = 3.0
-            else:             mult = 4.0
-            mult_rows.append({'Product No.':prod_no, 'Reorder Multiplier': mult, 'Demand CV': round(cv_m,2)})
-        mult_df = pd.DataFrame(mult_rows)
-        pi = pi.merge(mult_df, on='Product No.', how='left')
-        pi['Reorder Multiplier'] = pi['Reorder Multiplier'].fillna(3.0)
-        pi['Demand CV'] = pi['Demand CV'].fillna(0.0)
-        # Recalculate suggested reorder using smart multiplier
-        pi['Smart Reorder Sqm'] = ((pi['Sales Velocity/Month'] * pi['Reorder Multiplier']) - pi['Current Stock Sqm']).clip(lower=0).round(1)
-    except:
-        pi['Reorder Multiplier'] = 3.0
-        pi['Demand CV'] = 0.0
-        pi['Smart Reorder Sqm'] = 0.0
+    # ── Smart Reorder Multiplier (vectorised) ─────────────────────────────────
+    _monthly_s = _sal_all.copy()
+    _monthly_s['Month_ts'] = _monthly_s['Date'].dt.to_period('M').dt.to_timestamp()
+    _magg = _monthly_s.groupby(['Product No.','Month_ts'])['Sq.m'].sum().reset_index()
+    _magg2 = _magg.groupby('Product No.')['Sq.m'].agg(['mean','std','count']).reset_index()
+    _magg2.columns = ['Product No.','_mean','_std','_cnt']
+    _magg2 = _magg2[_magg2['_cnt'] >= 4]
+    _magg2['_cv'] = (_magg2['_std'] / _magg2['_mean'].replace(0,None)).fillna(0)
+    _magg2['Reorder Multiplier'] = np.where(_magg2['_cv'] < 0.5, 2.0,
+                                   np.where(_magg2['_cv'] < 1.5, 3.0, 4.0))
+    _magg2['Demand CV'] = _magg2['_cv'].round(2)
+    pi = pi.merge(_magg2[['Product No.','Reorder Multiplier','Demand CV']], on='Product No.', how='left')
+    pi['Reorder Multiplier'] = pi['Reorder Multiplier'].fillna(3.0)
+    pi['Demand CV']          = pi['Demand CV'].fillna(0.0)
+    pi['Smart Reorder Sqm']  = ((pi['Sales Velocity/Month'] * pi['Reorder Multiplier']) -
+                                 pi['Current Stock Sqm']).clip(lower=0).round(1)
 
     return pi
 
