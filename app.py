@@ -736,81 +736,6 @@ def build_pi(_df, _prod):
     pi['Freq Recent'] = (pi['_rec_sale_days'] / _rw).round(4)
     pi.drop(columns=['_rec_sale_days'], inplace=True)
 
-    # ── Size-Category Velocity Benchmark ─────────────────────────────────────
-    # Average monthly sales velocity across ALL products in the same Size group
-    _size_avg = pi.groupby('Size')['Sales Velocity/Month'].mean().reset_index()
-    _size_avg.columns = ['Size', 'Size Avg Velocity']
-    pi = pi.merge(_size_avg, on='Size', how='left')
-    pi['Size Avg Velocity'] = pi['Size Avg Velocity'].fillna(0).round(2)
-    pi['vs Size Avg %'] = np.where(
-        pi['Size Avg Velocity'] > 0,
-        ((pi['Sales Velocity/Month'] - pi['Size Avg Velocity']) / pi['Size Avg Velocity'] * 100).round(1),
-        0.0
-    )
-
-    # ── FM Composite Reorder Score ────────────────────────────────────────────
-    # Gate: must be a (base) fast mover — ignore concentration suffix for gating
-    _is_fm_base = pi['Demand Pattern'].str.replace(' ⚠️', '', regex=False).isin(
-        ['Stable Fast Mover', 'Volatile Fast Mover']
-    )
-    _min_vel   = cfg.get('fm_min_velocity', 5.0)
-    _rec_days_gate = cfg.get('fm_recency_days', 180)
-
-    # 1. Recent Freq score (0–100): scaled to fast-mover threshold
-    _fm_freq_th = max(cfg['dp_fast_freq'], 0.001)
-    _s_recent_freq = (pi['Freq Recent'] / _fm_freq_th * 100).clip(upper=100)
-
-    # 2. Size-relative velocity score (0–100): 0% = at average, 200%+ = top
-    _s_size_rel = ((pi['vs Size Avg %'] + 100) / 2).clip(0, 100)
-
-    # 3. Velocity floor score (0–100): how far above the minimum threshold
-    _s_vel_floor = np.where(
-        pi['Sales Velocity/Month'] >= _min_vel,
-        ((pi['Sales Velocity/Month'] - _min_vel) / max(_min_vel * 4, 1) * 100 + 50).clip(0, 100),
-        (pi['Sales Velocity/Month'] / max(_min_vel, 1) * 50)  # below floor: 0–49
-    )
-
-    # 4. Concentration score (0–100): Diversified = 100, Single Dependency = 0
-    _conc_map = {'Diversified': 100, 'Moderate': 70, 'Highly Concentrated': 30, 'Single Dependency': 0}
-    _s_conc = pi['Demand Concentration'].map(_conc_map).fillna(50)
-
-    # 5. All-time Freq score (0–100)
-    _s_alltime_freq = (pi['Freq'] / _fm_freq_th * 100).clip(upper=100)
-
-    # 6. CV score (0–100): low CV = stable = good score
-    _cv_max = cfg['dp_cv_threshold']
-    _s_cv = (1 - (pi['SaleCV'].clip(upper=_cv_max) / max(_cv_max, 1))) * 100
-
-    # Weighted composite
-    _w_rf  = cfg.get('fm_w_recent_freq', 0.25)
-    _w_sr  = cfg.get('fm_w_size_rel',    0.20)
-    _w_vf  = cfg.get('fm_w_vel_floor',   0.20)
-    _w_cn  = cfg.get('fm_w_conc',        0.15)
-    _w_af  = cfg.get('fm_w_alltime_freq',0.10)
-    _w_cv  = cfg.get('fm_w_cv',          0.10)
-
-    _fm_raw = (
-        _s_recent_freq * _w_rf +
-        _s_size_rel    * _w_sr +
-        pd.Series(_s_vel_floor, index=pi.index) * _w_vf +
-        _s_conc        * _w_cn +
-        _s_alltime_freq* _w_af +
-        _s_cv          * _w_cv
-    ).round(1)
-
-    # Hard gates: not a fast mover → 0; no sale in recency window → 0; below velocity floor → cap at 30
-    _below_floor = pi['Sales Velocity/Month'] < _min_vel
-    _stale       = pi['Days Since Last Sale'].fillna(999) > _rec_days_gate
-    pi['FM Reorder Score'] = np.where(
-        ~_is_fm_base | _stale, 0.0,
-        np.where(_below_floor, _fm_raw.clip(upper=30), _fm_raw)
-    ).round(1)
-
-    # Grade label
-    pi['FM Grade'] = np.where(pi['FM Reorder Score'] >= 75, '🔥 A',
-                    np.where(pi['FM Reorder Score'] >= 50, '🟢 B',
-                    np.where(pi['FM Reorder Score'] >= 25, '🟡 C', '⚪ —')))
-
     # ── XYZ ─────────────────────────────────────────────────────────────────
     pi['XYZ'] = np.where(pi['Consistency %'] >= cfg['xyz_x_pct'], 'X',
                 np.where(pi['Consistency %'] >= cfg['xyz_y_pct'], 'Y', 'Z'))
@@ -894,6 +819,58 @@ def build_pi(_df, _prod):
     pi['ABC']     = np.where(pi['Cum %'] <= cfg['abc_a_pct'], 'A',
                     np.where(pi['Cum %'] <= cfg['abc_b_pct'], 'B', 'C'))
     pi['ABC_XYZ'] = pi['ABC'] + pi['XYZ']
+
+    # ── Size-Category Velocity Benchmark ─────────────────────────────────────
+    # Must be after metadata merge so 'Size' column exists
+    _size_avg = pi.groupby('Size')['Sales Velocity/Month'].mean().reset_index()
+    _size_avg.columns = ['Size', 'Size Avg Velocity']
+    pi = pi.merge(_size_avg, on='Size', how='left')
+    pi['Size Avg Velocity'] = pi['Size Avg Velocity'].fillna(0).round(2)
+    pi['vs Size Avg %'] = np.where(
+        pi['Size Avg Velocity'] > 0,
+        ((pi['Sales Velocity/Month'] - pi['Size Avg Velocity']) / pi['Size Avg Velocity'] * 100).round(1),
+        0.0
+    )
+
+    # ── FM Composite Reorder Score ────────────────────────────────────────────
+    _is_fm_base = pi['Demand Pattern'].str.replace(' ⚠️', '', regex=False).isin(
+        ['Stable Fast Mover', 'Volatile Fast Mover']
+    )
+    _min_vel       = cfg.get('fm_min_velocity', 5.0)
+    _rec_days_gate = cfg.get('fm_recency_days', 180)
+    _fm_freq_th    = max(cfg['dp_fast_freq'], 0.001)
+
+    _s_recent_freq  = (pi['Freq Recent'] / _fm_freq_th * 100).clip(upper=100)
+    _s_size_rel     = ((pi['vs Size Avg %'] + 100) / 2).clip(0, 100)
+    _s_vel_floor    = np.where(
+        pi['Sales Velocity/Month'] >= _min_vel,
+        ((pi['Sales Velocity/Month'] - _min_vel) / max(_min_vel * 4, 1) * 100 + 50).clip(0, 100),
+        (pi['Sales Velocity/Month'] / max(_min_vel, 1) * 50)
+    )
+    _conc_map       = {'Diversified': 100, 'Moderate': 70, 'Highly Concentrated': 30, 'Single Dependency': 0}
+    _s_conc         = pi['Demand Concentration'].map(_conc_map).fillna(50)
+    _s_alltime_freq = (pi['Freq'] / _fm_freq_th * 100).clip(upper=100)
+    _cv_max         = cfg['dp_cv_threshold']
+    _s_cv           = (1 - (pi['SaleCV'].clip(upper=_cv_max) / max(_cv_max, 1))) * 100
+
+    _fm_raw = (
+        _s_recent_freq  * cfg.get('fm_w_recent_freq',  0.25) +
+        _s_size_rel     * cfg.get('fm_w_size_rel',     0.20) +
+        pd.Series(_s_vel_floor, index=pi.index) * cfg.get('fm_w_vel_floor', 0.20) +
+        _s_conc         * cfg.get('fm_w_conc',         0.15) +
+        _s_alltime_freq * cfg.get('fm_w_alltime_freq', 0.10) +
+        _s_cv           * cfg.get('fm_w_cv',           0.10)
+    ).round(1)
+
+    _below_floor = pi['Sales Velocity/Month'] < _min_vel
+    _stale       = pi['Days Since Last Sale'].fillna(999) > _rec_days_gate
+    pi['FM Reorder Score'] = np.where(
+        ~_is_fm_base | _stale, 0.0,
+        np.where(_below_floor, _fm_raw.clip(upper=30), _fm_raw)
+    ).round(1)
+    pi['FM Grade'] = np.where(pi['FM Reorder Score'] >= 75, '🔥 A',
+                    np.where(pi['FM Reorder Score'] >= 50, '🟢 B',
+                    np.where(pi['FM Reorder Score'] >= 25, '🟡 C', '⚪ —')))
 
     # ── Ghost Performer Detection — purchase-gap method ───────────────────────
     # A real stockout = gap of 30+ days between last sale and next purchase.
