@@ -116,6 +116,20 @@ DEFAULT_CONFIG = {
     "liq_days_1":             450,
     "liq_days_2":             540,
     "liq_days_3":             630,
+    # ── Fast Mover Scoring ────────────────────────────────────
+    # Minimum velocity (sqm/month) a product must hit to qualify
+    "fm_min_velocity":        5.0,
+    # Window (days) for recent frequency calculation
+    "fm_recent_window":       90,
+    # Recency gate — no sale in this many days → dead override
+    "fm_recency_days":        180,
+    # FM Composite Reorder Score weights (must sum to 1.0)
+    "fm_w_recent_freq":       0.25,   # Recent Frequency
+    "fm_w_size_rel":          0.20,   # vs Size Category Average
+    "fm_w_vel_floor":         0.20,   # Velocity Floor Score
+    "fm_w_conc":              0.15,   # Demand Concentration
+    "fm_w_alltime_freq":      0.10,   # All-Time Frequency
+    "fm_w_cv":                0.10,   # CV (Stability)
 }
 
 def get_config():
@@ -660,15 +674,142 @@ def build_pi(_df, _prod):
     _total_months            = _df['Date'].dt.to_period('M').nunique()
     pi['Consistency %']      = (pi['SaleDaysCount'] / max(_total_months, 1) * 100).round(1)
 
+    # ── Customer Concentration ───────────────────────────────────────────────
+    # Top Customer % = revenue share of single biggest buyer per product
+    _top_cust_rev = (_sal_all.groupby(['Product No.','Account Name'])['SALE']
+                     .sum().reset_index())
+    _top_cust_rev = _top_cust_rev.sort_values('SALE', ascending=False)
+    _top_buyer    = _top_cust_rev.groupby('Product No.').first().reset_index()
+    _top_buyer.columns = ['Product No.', 'Top Customer', 'Top Customer Revenue']
+    _total_rev    = _sal_all.groupby('Product No.')['SALE'].sum().reset_index()
+    _total_rev.columns = ['Product No.', '_total_rev']
+    _top_buyer    = _top_buyer.merge(_total_rev, on='Product No.', how='left')
+    _top_buyer['Top Customer %'] = (
+        _top_buyer['Top Customer Revenue'] / _top_buyer['_total_rev'].replace(0, None) * 100
+    ).fillna(0).round(1)
+    pi = pi.merge(_top_buyer[['Product No.','Top Customer','Top Customer %']], on='Product No.', how='left')
+    pi['Top Customer %'] = pi['Top Customer %'].fillna(0)
+
+    _tcp = pi['Top Customer %']
+    pi['Demand Concentration'] = np.where(_tcp == 100,  'Single Dependency',
+                                 np.where(_tcp >= 70,   'Highly Concentrated',
+                                 np.where(_tcp >= 40,   'Moderate',
+                                                         'Diversified')))
+
     # ── Demand Pattern ───────────────────────────────────────────────────────
-    _cond_fast = pi['Freq'] >= cfg['dp_fast_freq']
-    _cond_slow = (pi['Freq'] >= cfg['dp_slow_freq']) & ~_cond_fast
+    _cond_fast   = pi['Freq'] >= cfg['dp_fast_freq']
+    _cond_slow   = (pi['Freq'] >= cfg['dp_slow_freq']) & ~_cond_fast
     _cond_low_cv = pi['SaleCV'] < cfg['dp_cv_threshold']
-    pi['Demand Pattern'] = np.where(pi['NetSalesSqm'] <= 0, 'No Sales / Returns Only',
-                           np.where(_cond_fast & _cond_low_cv, 'Stable Fast Mover',
-                           np.where(_cond_fast, 'Volatile Fast Mover',
-                           np.where(_cond_slow & _cond_low_cv, 'Slow Stable',
-                           np.where(_cond_slow, 'Erratic Demand', 'Dead / Negligible')))))
+    _cond_recent = pi['DaysSinceLastSale'] <= 180          # sold within 6 months
+    _cond_conc   = pi['Demand Concentration'].isin(['Single Dependency','Highly Concentrated'])
+
+    # Base pattern from Freq + CV
+    _base_pattern = np.where(pi['NetSalesSqm'] <= 0, 'No Sales / Returns Only',
+                    np.where(_cond_fast & _cond_low_cv, 'Stable Fast Mover',
+                    np.where(_cond_fast, 'Volatile Fast Mover',
+                    np.where(_cond_slow & _cond_low_cv, 'Slow Stable',
+                    np.where(_cond_slow, 'Erratic Demand', 'Dead / Negligible')))))
+
+    # Recency override: if no sale in 180+ days, history is irrelevant — mark dead
+    _base_pattern = np.where(
+        (pi['NetSalesSqm'] > 0) & ~_cond_recent &
+        pd.Series(_base_pattern).isin(['Stable Fast Mover','Volatile Fast Mover','Slow Stable','Erratic Demand']).values,
+        'Dead / Negligible',
+        _base_pattern
+    )
+
+    # Concentration suffix: flag concentrated demand without hiding the base pattern
+    pi['Demand Pattern'] = np.where(
+        _cond_conc & pd.Series(_base_pattern).isin(['Stable Fast Mover','Volatile Fast Mover']).values,
+        pd.Series(_base_pattern) + ' ⚠️',   # e.g. "Stable Fast Mover ⚠️" = concentrated
+        pd.Series(_base_pattern)
+    )
+
+    # ── Recent Frequency (configurable window) ───────────────────────────────
+    _rw = cfg.get('fm_recent_window', 90)
+    _cut_recent = today - pd.Timedelta(days=_rw)
+    _rec_sal = _sal_all[_sal_all['Date'] >= _cut_recent]
+    _rec_days = _rec_sal.groupby('Product No.')['Date'].apply(lambda x: x.dt.date.nunique()).reset_index()
+    _rec_days.columns = ['Product No.', '_rec_sale_days']
+    pi = pi.merge(_rec_days, on='Product No.', how='left')
+    pi['_rec_sale_days'] = pi['_rec_sale_days'].fillna(0)
+    pi['Freq Recent'] = (pi['_rec_sale_days'] / _rw).round(4)
+    pi.drop(columns=['_rec_sale_days'], inplace=True)
+
+    # ── Size-Category Velocity Benchmark ─────────────────────────────────────
+    # Average monthly sales velocity across ALL products in the same Size group
+    _size_avg = pi.groupby('Size')['Sales Velocity/Month'].mean().reset_index()
+    _size_avg.columns = ['Size', 'Size Avg Velocity']
+    pi = pi.merge(_size_avg, on='Size', how='left')
+    pi['Size Avg Velocity'] = pi['Size Avg Velocity'].fillna(0).round(2)
+    pi['vs Size Avg %'] = np.where(
+        pi['Size Avg Velocity'] > 0,
+        ((pi['Sales Velocity/Month'] - pi['Size Avg Velocity']) / pi['Size Avg Velocity'] * 100).round(1),
+        0.0
+    )
+
+    # ── FM Composite Reorder Score ────────────────────────────────────────────
+    # Gate: must be a (base) fast mover — ignore concentration suffix for gating
+    _is_fm_base = pi['Demand Pattern'].str.replace(' ⚠️', '', regex=False).isin(
+        ['Stable Fast Mover', 'Volatile Fast Mover']
+    )
+    _min_vel   = cfg.get('fm_min_velocity', 5.0)
+    _rec_days_gate = cfg.get('fm_recency_days', 180)
+
+    # 1. Recent Freq score (0–100): scaled to fast-mover threshold
+    _fm_freq_th = max(cfg['dp_fast_freq'], 0.001)
+    _s_recent_freq = (pi['Freq Recent'] / _fm_freq_th * 100).clip(upper=100)
+
+    # 2. Size-relative velocity score (0–100): 0% = at average, 200%+ = top
+    _s_size_rel = ((pi['vs Size Avg %'] + 100) / 2).clip(0, 100)
+
+    # 3. Velocity floor score (0–100): how far above the minimum threshold
+    _s_vel_floor = np.where(
+        pi['Sales Velocity/Month'] >= _min_vel,
+        ((pi['Sales Velocity/Month'] - _min_vel) / max(_min_vel * 4, 1) * 100 + 50).clip(0, 100),
+        (pi['Sales Velocity/Month'] / max(_min_vel, 1) * 50)  # below floor: 0–49
+    )
+
+    # 4. Concentration score (0–100): Diversified = 100, Single Dependency = 0
+    _conc_map = {'Diversified': 100, 'Moderate': 70, 'Highly Concentrated': 30, 'Single Dependency': 0}
+    _s_conc = pi['Demand Concentration'].map(_conc_map).fillna(50)
+
+    # 5. All-time Freq score (0–100)
+    _s_alltime_freq = (pi['Freq'] / _fm_freq_th * 100).clip(upper=100)
+
+    # 6. CV score (0–100): low CV = stable = good score
+    _cv_max = cfg['dp_cv_threshold']
+    _s_cv = (1 - (pi['SaleCV'].clip(upper=_cv_max) / max(_cv_max, 1))) * 100
+
+    # Weighted composite
+    _w_rf  = cfg.get('fm_w_recent_freq', 0.25)
+    _w_sr  = cfg.get('fm_w_size_rel',    0.20)
+    _w_vf  = cfg.get('fm_w_vel_floor',   0.20)
+    _w_cn  = cfg.get('fm_w_conc',        0.15)
+    _w_af  = cfg.get('fm_w_alltime_freq',0.10)
+    _w_cv  = cfg.get('fm_w_cv',          0.10)
+
+    _fm_raw = (
+        _s_recent_freq * _w_rf +
+        _s_size_rel    * _w_sr +
+        pd.Series(_s_vel_floor, index=pi.index) * _w_vf +
+        _s_conc        * _w_cn +
+        _s_alltime_freq* _w_af +
+        _s_cv          * _w_cv
+    ).round(1)
+
+    # Hard gates: not a fast mover → 0; no sale in recency window → 0; below velocity floor → cap at 30
+    _below_floor = pi['Sales Velocity/Month'] < _min_vel
+    _stale       = pi['Days Since Last Sale'].fillna(999) > _rec_days_gate
+    pi['FM Reorder Score'] = np.where(
+        ~_is_fm_base | _stale, 0.0,
+        np.where(_below_floor, _fm_raw.clip(upper=30), _fm_raw)
+    ).round(1)
+
+    # Grade label
+    pi['FM Grade'] = np.where(pi['FM Reorder Score'] >= 75, '🔥 A',
+                    np.where(pi['FM Reorder Score'] >= 50, '🟢 B',
+                    np.where(pi['FM Reorder Score'] >= 25, '🟡 C', '⚪ —')))
 
     # ── XYZ ─────────────────────────────────────────────────────────────────
     pi['XYZ'] = np.where(pi['Consistency %'] >= cfg['xyz_x_pct'], 'X',
@@ -1823,28 +1964,109 @@ Products dead 1-2 years: {((dead['Days Since Last Sale']>365)&(dead['Days Since 
 
 elif page == "✅ Fast Movers":
     st.title("✅ Fast Movers")
-    with st.expander("ℹ️ About this report", expanded=False):
-        st.markdown('**What it shows:** Your top-selling products by velocity — products that sell consistently and quickly.\n\n**Key metrics explained:**\n- **Sales Velocity (sqm/month)** — How many sqm this product sells on average per month. e.g. 450 sqm/month means it sells roughly 15 sqm every day.\n- **Days of Stock Left** — At current velocity, how many days until stockout. e.g. 12 days means you have 12 days before this product hits zero.\n- **Reorder Flag** — Products where Days of Stock < Reorder Lead Time. These need a PO raised immediately.\n- **Revenue Contribution** — What % of total sales comes from this product. Top 20 products often drive 80% of revenue.')
+
+    _cfg_fm = get_config()
+    _rw_label = _cfg_fm.get('fm_recent_window', 90)
+
+    with st.expander("ℹ️ How Fast Movers & the Reorder Score work", expanded=False):
+        st.markdown(f"""
+**What qualifies as a Fast Mover?**
+A product must meet **both** of these gates simultaneously:
+1. **Frequency ≥ {_cfg_fm['dp_fast_freq']:.2f}** — sold on at least {_cfg_fm['dp_fast_freq']*100:.0f}% of days it has been in inventory (configurable in ⚙️ Metrics)
+2. **Sale within last {_cfg_fm.get('fm_recency_days',180)} days** — any product that hasn't sold in {_cfg_fm.get('fm_recency_days',180)} days is overridden to *Dead / Negligible* regardless of history
+
+A ⚠️ suffix means demand is concentrated in one or two customers — real volume, but fragile.
+
+---
+**FM Reorder Score (0–100) — the 6 signals:**
+
+| Signal | What it measures | Weight |
+|---|---|---|
+| 🕐 Recent Freq (last {_rw_label}d) | Is it selling *right now*, not just historically? | {_cfg_fm.get('fm_w_recent_freq',0.25)*100:.0f}% |
+| 📐 vs Size Avg | Does it outsell all other products in its size category? | {_cfg_fm.get('fm_w_size_rel',0.20)*100:.0f}% |
+| ⚡ Velocity Floor | Is total volume meaningful (≥ {_cfg_fm.get('fm_min_velocity',5):.0f} sqm/month)? | {_cfg_fm.get('fm_w_vel_floor',0.20)*100:.0f}% |
+| 👥 Demand Spread | Is demand from multiple customers (not a single buyer)? | {_cfg_fm.get('fm_w_conc',0.15)*100:.0f}% |
+| 📅 All-Time Freq | Long-run track record of consistent selling | {_cfg_fm.get('fm_w_alltime_freq',0.10)*100:.0f}% |
+| 📊 CV (Stability) | Are order sizes consistent or all over the place? | {_cfg_fm.get('fm_w_cv',0.10)*100:.0f}% |
+
+**Score 75–100 🔥 A** = Reorder immediately | **50–74 🟢 B** = Strong candidate | **25–49 🟡 C** = Monitor | **<25 ⚪ —** = Not a real fast mover
+""")
 
     with st.expander("🔍 Filters", expanded=True):
         _fm_min = df['Date'].min().date(); _fm_max = df['Date'].max().date()
-        _fm_dr = st.date_input("📅 Date Range", value=(_fm_min, _fm_max), min_value=_fm_min, max_value=_fm_max, key="fm_date")
-        _fm_df = df.copy()
-        if len(_fm_dr)==2:
-            _fm_df = _fm_df[(_fm_df['Date'].dt.date>=_fm_dr[0])&(_fm_df['Date'].dt.date<=_fm_dr[1])]
-        _fm_pi = pi if (_fm_dr[0]==_fm_min and _fm_dr[1]==_fm_max and len(_fm_dr)==2) else build_pi(_fm_df, prod)
-        flt = pi_filters(_fm_pi, "fm")
-    fast = flt[flt['Demand Pattern'].isin(['Stable Fast Mover','Volatile Fast Mover'])].copy().sort_values('Sales Velocity/Month',ascending=False)
-    c1,c2,c3 = st.columns(3)
-    c1.metric("Fast Moving Products",f"{len(fast):,}"); c2.metric("Total Sales Velocity",f"{fast['Sales Velocity/Month'].sum():,.0f} sqm/month"); c3.metric("Reorder Alerts",f"{(fast['Stock Health']=='Reorder Now').sum():,}")
+        _fm_dr  = st.date_input("📅 Date Range", value=(_fm_min, _fm_max),
+                                min_value=_fm_min, max_value=_fm_max, key="fm_date")
+        _fm_df  = df.copy()
+        if len(_fm_dr) == 2:
+            _fm_df = _fm_df[(_fm_df['Date'].dt.date >= _fm_dr[0]) & (_fm_df['Date'].dt.date <= _fm_dr[1])]
+        _fm_pi  = pi if (_fm_dr[0] == _fm_min and _fm_dr[1] == _fm_max and len(_fm_dr) == 2) else build_pi(_fm_df, prod)
+        flt     = pi_filters(_fm_pi, "fm")
+
+    # ── Base fast-mover filter (includes ⚠️ variants) ────────────────────────
+    fast = flt[flt['Demand Pattern'].str.replace(' ⚠️','',regex=False).isin(
+        ['Stable Fast Mover','Volatile Fast Mover'])].copy()
+
+    # ── Grade filter ─────────────────────────────────────────────────────────
+    _grade_opts = ['All Grades','🔥 A (≥75)','🟢 B (50–74)','🟡 C (25–49)','⚪ — (<25)']
+    _grade_sel  = st.selectbox("Filter by FM Grade", _grade_opts, key="fm_grade")
+    if   _grade_sel == '🔥 A (≥75)':  fast = fast[fast['FM Reorder Score'] >= 75]
+    elif _grade_sel == '🟢 B (50–74)': fast = fast[(fast['FM Reorder Score'] >= 50) & (fast['FM Reorder Score'] < 75)]
+    elif _grade_sel == '🟡 C (25–49)': fast = fast[(fast['FM Reorder Score'] >= 25) & (fast['FM Reorder Score'] < 50)]
+    elif _grade_sel == '⚪ — (<25)':   fast = fast[fast['FM Reorder Score'] < 25]
+    fast = fast.sort_values('FM Reorder Score', ascending=False)
+
+    # ── KPI row ───────────────────────────────────────────────────────────────
+    _c1,_c2,_c3,_c4,_c5 = st.columns(5)
+    _c1.metric("Fast Movers",          f"{len(fast):,}")
+    _c2.metric("🔥 Grade A",           f"{(fast['FM Reorder Score'] >= 75).sum():,}")
+    _c3.metric("Total Velocity",       f"{fast['Sales Velocity/Month'].sum():,.0f} sqm/mo")
+    _c4.metric("Reorder Now",          f"{(fast['Stock Health'] == 'Reorder Now').sum():,}")
+    _c5.metric("Concentrated Demand ⚠️", f"{fast['Demand Pattern'].str.contains('⚠️').sum():,}",
+               help="Demand dominated by ≤2 customers — real volume but fragile")
     st.divider()
-    reorder = fast[fast['Stock Health']=='Reorder Now']
-    if len(reorder)>0:
-        st.subheader(f"🚨 Reorder Now — {len(reorder)} Products")
-        st.dataframe(reorder[['Product No.','Brand Name','Category','Size','Current Stock Sqm','Sales Velocity/Month','Months of Stock','Demand Pattern']], hide_index=True, use_container_width=True)
+
+    # ── Reorder Now banner ────────────────────────────────────────────────────
+    _reorder_now = fast[fast['Stock Health'] == 'Reorder Now'].sort_values('FM Reorder Score', ascending=False)
+    if len(_reorder_now) > 0:
+        st.subheader(f"🚨 Reorder Now — {len(_reorder_now)} Products")
+        _rn_cols = ['Product No.','Brand Name','Size','FM Reorder Score','FM Grade',
+                    'Current Stock Sqm','Sales Velocity/Month','Months of Stock',
+                    'Demand Pattern','Smart Reorder Sqm']
+        _rn_cols = [c for c in _rn_cols if c in _reorder_now.columns]
+        st.dataframe(_reorder_now[_rn_cols], hide_index=True, use_container_width=True)
         st.divider()
-    st.subheader("All Fast Movers")
-    st.dataframe(fast[['Product No.','Brand Name','Category','Size','Current Stock Sqm','Stock Value PKR','Sales Velocity/Month','Months of Stock','Demand Pattern','Stock Health','Reorder Score']], hide_index=True, use_container_width=True)
+
+    # ── Full fast movers table ────────────────────────────────────────────────
+    st.subheader(f"📋 All Fast Movers — {len(fast):,} products")
+
+    _fm_display_cols = [
+        'Product No.','Brand Name','Category','Size',
+        'FM Reorder Score','FM Grade',
+        # ── 6 scoring signals ──
+        f'Freq Recent',
+        'vs Size Avg %','Size Avg Velocity',
+        'Sales Velocity/Month',
+        'Demand Concentration','Top Customer %',
+        'Freq','SaleCV',
+        # ── Context ──
+        'Demand Pattern',
+        'Current Stock Sqm','Stock Value PKR',
+        'Months of Stock','Stock Health',
+        'Days Since Last Sale',
+        'UniqueCustomers',
+        'Smart Reorder Sqm',
+    ]
+    _fm_display_cols = [c for c in _fm_display_cols if c in fast.columns]
+    st.dataframe(fast[_fm_display_cols], hide_index=True, use_container_width=True)
+
+    st.caption(
+        f"**Column guide** — *Freq Recent*: sale frequency in last {_rw_label} days (higher = selling now) | "
+        f"*vs Size Avg %*: how this product's velocity compares to all products in same size (+50% means outsells peers by 50%) | "
+        f"*SaleCV*: lower = more stable order sizes | *Demand Concentration*: Diversified = healthy demand spread"
+    )
+    st.download_button("📥 Download Fast Movers",
+                       fast[_fm_display_cols].to_csv(index=False),
+                       "fast_movers.csv", "text/csv")
 
 elif page == "📦 Product Intelligence":
     st.title("📦 Product Intelligence")
@@ -5857,6 +6079,104 @@ elif page == "⚙️ Metrics Config":
         st.markdown("**Stage 4 (beyond Stage 3)**")
         cfg['liq_disc_4'] = st.number_input("Stage 4 discount %", value=cfg['liq_disc_4'], step=5, key="cfg_liq_p4")
     st.caption(f"≤{cfg['liq_days_1']}d → {cfg['liq_disc_1']}% | ≤{cfg['liq_days_2']}d → {cfg['liq_disc_2']}% | ≤{cfg['liq_days_3']}d → {cfg['liq_disc_3']}% | beyond → {cfg['liq_disc_4']}%")
+
+    # ── Section 10: Fast Mover Scoring ────────────────────────
+    st.divider()
+    st.subheader("🔥 Fast Mover Reorder Scoring")
+    st.caption("Controls how the FM Reorder Score (0–100) is calculated and what qualifies as a fast mover")
+
+    st.markdown("#### Gates — a product must pass both to appear in Fast Movers")
+    _g1, _g2 = st.columns(2)
+    with _g1:
+        cfg['fm_min_velocity'] = st.number_input(
+            "⚡ Minimum velocity (sqm/month)",
+            value=cfg.get('fm_min_velocity', 5.0), step=1.0, format="%.1f",
+            help="A product must sell at least this many sqm per month to qualify. "
+                 "Below this = not worth reordering regardless of frequency. "
+                 "e.g. set to 10 to exclude products that sell only 1-2 sqm/month.",
+            key="cfg_fm_min_vel")
+        st.caption(f"Products below {cfg['fm_min_velocity']:.0f} sqm/month are capped at score 30")
+    with _g2:
+        cfg['fm_recency_days'] = st.number_input(
+            "📅 Recency gate (days)",
+            value=cfg.get('fm_recency_days', 180), step=30,
+            help="If a product hasn't sold in this many days it is overridden to Dead/Negligible "
+                 "regardless of its historical frequency. Prevents reordering products whose "
+                 "demand has silently died. Default = 180 days (6 months).",
+            key="cfg_fm_recency")
+        st.caption(f"No sale in {cfg['fm_recency_days']} days → score forced to 0")
+
+    st.markdown("#### Recent Frequency window")
+    cfg['fm_recent_window'] = st.slider(
+        "📆 Recent Freq window (days)", 30, 180,
+        int(cfg.get('fm_recent_window', 90)), 30,
+        help="How many recent days to use when calculating Recent Frequency. "
+             "30 days = very current signal. 90 days = balanced. 180 days = longer trend. "
+             "This is the highest-weighted signal because it shows what's selling *right now* "
+             "rather than relying on historical averages.",
+        key="cfg_fm_rw")
+    st.caption(f"Recent Freq = unique sale days in last {cfg['fm_recent_window']}d ÷ {cfg['fm_recent_window']}")
+
+    st.markdown("#### Score Weights — must total 100%")
+    st.caption(
+        "Each weight controls how much that signal contributes to the FM Reorder Score. "
+        "Higher weight = that signal matters more. Adjust to match your business priorities."
+    )
+    _wc1,_wc2,_wc3 = st.columns(3)
+    with _wc1:
+        cfg['fm_w_recent_freq'] = st.slider(
+            "🕐 Recent Frequency %", 0, 60,
+            int(cfg.get('fm_w_recent_freq', 0.25) * 100), 5,
+            help="Is it selling RIGHT NOW? A product with high all-time freq but no recent sales "
+                 "should not be reordered. This is the most important signal.",
+            key="cfg_fm_w_rf") / 100
+        cfg['fm_w_size_rel'] = st.slider(
+            "📐 vs Size Average %", 0, 60,
+            int(cfg.get('fm_w_size_rel', 0.20) * 100), 5,
+            help="Does this product outsell all other products in its size category? "
+                 "e.g. NV612205 sells 200 sqm/month while all 60×120 products average 100 sqm — "
+                 "it scores 100% on this signal. Identifies category winners.",
+            key="cfg_fm_w_sr") / 100
+    with _wc2:
+        cfg['fm_w_vel_floor'] = st.slider(
+            "⚡ Velocity Floor %", 0, 60,
+            int(cfg.get('fm_w_vel_floor', 0.20) * 100), 5,
+            help="How far above the minimum velocity threshold is this product? "
+                 "A product at exactly the minimum gets 50/100 on this signal. "
+                 "5× the minimum gets 100/100.",
+            key="cfg_fm_w_vf") / 100
+        cfg['fm_w_conc'] = st.slider(
+            "👥 Demand Spread %", 0, 40,
+            int(cfg.get('fm_w_conc', 0.15) * 100), 5,
+            help="Is demand spread across multiple customers? Diversified = 100, "
+                 "Single Dependency (one customer = 100% of sales) = 0. "
+                 "A product bought only by one customer is risky to reorder — "
+                 "if that customer stops, you're stuck with stock.",
+            key="cfg_fm_w_cn") / 100
+    with _wc3:
+        cfg['fm_w_alltime_freq'] = st.slider(
+            "📅 All-Time Frequency %", 0, 40,
+            int(cfg.get('fm_w_alltime_freq', 0.10) * 100), 5,
+            help="Long-run selling track record. Unique sale days ÷ total days in inventory. "
+                 "A product that has sold on 20% of all days since it was bought has "
+                 "strong historical demand. Lower weight than recent freq because "
+                 "history matters less than current momentum.",
+            key="cfg_fm_w_af") / 100
+        cfg['fm_w_cv'] = st.slider(
+            "📊 CV Stability %", 0, 40,
+            int(cfg.get('fm_w_cv', 0.10) * 100), 5,
+            help="How consistent are the order sizes? CV = standard deviation ÷ average order size. "
+                 "Low CV = customers always buy similar quantities (predictable). "
+                 "High CV = some orders are huge, some tiny — harder to plan for. "
+                 "Stable products are safer to reorder.",
+            key="cfg_fm_w_cv") / 100
+
+    _fm_total_w = (cfg['fm_w_recent_freq'] + cfg['fm_w_size_rel'] + cfg['fm_w_vel_floor'] +
+                   cfg['fm_w_conc'] + cfg['fm_w_alltime_freq'] + cfg['fm_w_cv'])
+    if abs(_fm_total_w - 1.0) > 0.05:
+        st.warning(f"⚠️ FM weights sum to {_fm_total_w*100:.0f}% — should be 100%. Adjust sliders.")
+    else:
+        st.success(f"FM weights sum: {_fm_total_w*100:.0f}% ✅")
 
     # ── Apply & Reset ─────────────────────────────────────────
     st.divider()
