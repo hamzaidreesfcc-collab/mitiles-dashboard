@@ -864,10 +864,13 @@ def build_pi(_df, _prod):
 
     _below_floor = pi['Sales Velocity/Month'] < _min_vel
     _stale       = pi['Days Since Last Sale'].fillna(999) > _rec_days_gate
+    _fm_gated    = pd.Series(
+        np.where(_below_floor, _fm_raw.clip(upper=30).values, _fm_raw.values),
+        index=pi.index, dtype=float
+    )
     pi['FM Reorder Score'] = np.where(
-        ~_is_fm_base | _stale, 0.0,
-        np.where(_below_floor, _fm_raw.clip(upper=30), _fm_raw)
-    ).round(1)
+        (~_is_fm_base) | _stale, 0.0, _fm_gated
+    ).astype(float).round(1)
     pi['FM Grade'] = np.where(pi['FM Reorder Score'] >= 75, '🔥 A',
                     np.where(pi['FM Reorder Score'] >= 50, '🟢 B',
                     np.where(pi['FM Reorder Score'] >= 25, '🟡 C', '⚪ —')))
