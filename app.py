@@ -97,6 +97,7 @@ DEFAULT_CONFIG = {
     # Ghost Performer
     "ghost_min_vel":          10.0,
     "ghost_reorder_buffer":   1.5,
+    "ghost_min_st_pct":       60.0,   # Sell Through % floor to qualify as ghost
     # ML Risk thresholds
     "ml_risk_high":           70.0,
     "ml_risk_medium":         40.0,
@@ -878,8 +879,9 @@ def build_pi(_df, _prod):
     # ── Ghost Performer Detection — purchase-gap method ───────────────────────
     # A real stockout = gap of 30+ days between last sale and next purchase.
     # This avoids false positives from ERP Closing=0 posting artifacts.
-    # Qualifies only if: 2+ restock events AND true velocity >= 2× regular velocity
-    # AND currently out of stock (Current Stock Sqm <= 0) — i.e. actionable now.
+    # Qualifies only if: 2+ restock events AND true velocity >= 1.5× regular velocity
+    # AND Sell Through % >= ghost_min_st_pct — catches products with residual stock
+    # that have still burned through most of what was purchased.
 
     _g_sal = _sal_all.groupby('Product No.').agg(
         _first_sale=('Date','min'), _last_sale=('Date','max'),
@@ -922,29 +924,37 @@ def build_pi(_df, _prod):
         # Only flag if true velocity is meaningfully higher than regular velocity
         if _true_vel < 2 or _true_vel < _reg_vel * 1.5: continue
 
-        # Current stock — check if out of stock now
-        _cs_now = pi.loc[pi['Product No.']==_pno, 'Current Stock Sqm'].values
-        _cs_now = float(_cs_now[0]) if len(_cs_now) else 0
+        # Sell Through % check — qualifies if product has burned through enough stock
+        # (replaces hard "currently out of stock" gate — catches products with residual)
+        _pi_row     = pi.loc[pi['Product No.'] == _pno]
+        _st_pct     = float(_pi_row['Sell Through %'].values[0]) if len(_pi_row) else 0.0
+        _cs_now     = float(_pi_row['Current Stock Sqm'].values[0]) if len(_pi_row) else 0.0
+        _min_st     = cfg.get('ghost_min_st_pct', 60.0)
+        if _st_pct < _min_st: continue                   # hasn't sold enough to flag
 
         _ds_now = max((today - _sr['_last_sale']).days, 1)
         _ghost_score = round(_true_vel * len(_stockout_gaps) / _ds_now * 100, 2)
 
         _ghost_rows.append({
-            'Product No.':          _pno,
-            'True Velocity':        round(_true_vel, 1),
-            'Stockout Count':       len(_stockout_gaps),
-            'Avg Stockout Gap (d)': round(sum(_stockout_gaps)/len(_stockout_gaps), 0),
-            'Ghost Score':          _ghost_score,
+            'Product No.':           _pno,
+            'True Velocity':         round(_true_vel, 1),
+            'Stockout Count':        len(_stockout_gaps),
+            'Avg Stockout Gap (d)':  round(sum(_stockout_gaps)/len(_stockout_gaps), 0),
+            'Ghost Score':           _ghost_score,
             'Suggested Reorder Sqm': round(_true_vel * 3, 1),
-            'Currently Out':        _cs_now <= 0,
+            'Sell Through %':        round(_st_pct, 1),
+            'Residual Stock Sqm':    round(_cs_now, 1),
         })
 
     _ghost_df = pd.DataFrame(_ghost_rows) if _ghost_rows else pd.DataFrame(
         columns=['Product No.','True Velocity','Stockout Count',
-                 'Avg Stockout Gap (d)','Ghost Score','Suggested Reorder Sqm','Currently Out'])
+                 'Avg Stockout Gap (d)','Ghost Score','Suggested Reorder Sqm',
+                 'Sell Through %','Residual Stock Sqm'])
 
-    pi = pi.merge(_ghost_df[['Product No.','True Velocity','Stockout Count','Ghost Score','Suggested Reorder Sqm']],
-                  on='Product No.', how='left')
+    pi = pi.merge(_ghost_df[['Product No.','True Velocity','Stockout Count',
+                              'Ghost Score','Suggested Reorder Sqm',
+                              'Sell Through %','Residual Stock Sqm']],
+                  on='Product No.', how='left', suffixes=('','_ghost'))
     for _c in ['Ghost Score','True Velocity','Stockout Count','Suggested Reorder Sqm']:
         pi[_c] = pi[_c].fillna(0)
 
@@ -1973,6 +1983,7 @@ A ⚠️ suffix means demand is concentrated in one or two customers — real vo
 """)
 
     with st.expander("🔍 Filters", expanded=True):
+        # Row 1 — date range + Brand / Company / Category / Size / Stock Health
         _fm_min = df['Date'].min().date(); _fm_max = df['Date'].max().date()
         _fm_dr  = st.date_input("📅 Date Range", value=(_fm_min, _fm_max),
                                 min_value=_fm_min, max_value=_fm_max, key="fm_date")
@@ -1982,17 +1993,74 @@ A ⚠️ suffix means demand is concentrated in one or two customers — real vo
         _fm_pi  = pi if (_fm_dr[0] == _fm_min and _fm_dr[1] == _fm_max and len(_fm_dr) == 2) else build_pi(_fm_df, prod)
         flt     = pi_filters(_fm_pi, "fm")
 
-    # ── Base fast-mover filter (includes ⚠️ variants) ────────────────────────
+        st.markdown("---")
+
+        # Row 2 — fast-mover specific filters
+        _fr1, _fr2, _fr3, _fr4 = st.columns(4)
+        with _fr1:
+            _fm_pat_sel = st.selectbox(
+                "Demand Pattern",
+                ['All', 'Stable Fast Mover', 'Volatile Fast Mover',
+                 'Stable Fast Mover ⚠️', 'Volatile Fast Mover ⚠️'],
+                key="fm_pat_sel")
+        with _fr2:
+            _fm_conc_sel = st.selectbox(
+                "Demand Concentration",
+                ['All', 'Diversified', 'Moderate', 'Highly Concentrated', 'Single Dependency'],
+                key="fm_conc_sel")
+        with _fr3:
+            _fm_grade_sel = st.selectbox(
+                "FM Grade",
+                ['All Grades', '🔥 A (≥75)', '🟢 B (50–74)', '🟡 C (25–49)', '⚪ — (<25)'],
+                key="fm_grade")
+        with _fr4:
+            _fm_reorder_only = st.checkbox("🚨 Reorder Now only", value=False, key="fm_reorder_only")
+
+        # Row 3 — numeric thresholds
+        _fn1, _fn2, _fn3, _fn4 = st.columns(4)
+        with _fn1:
+            _fm_min_score = st.number_input(
+                "Min FM Score", min_value=0, max_value=100, value=0, step=5, key="fm_min_score",
+                help="Only show products with FM Reorder Score ≥ this value")
+        with _fn2:
+            _fm_min_vel_f = st.number_input(
+                "Min Velocity (sqm/mo)", min_value=0, value=0, step=10, key="fm_min_vel_f",
+                help="Only show products selling at least this many sqm per month")
+        with _fn3:
+            _fm_max_months = st.number_input(
+                "Max Months of Stock", min_value=0, value=999, step=1, key="fm_max_mos",
+                help="Hide products with more than this many months of stock remaining")
+        with _fn4:
+            _fm_min_customers = st.number_input(
+                "Min Unique Customers", min_value=0, value=0, step=1, key="fm_min_cust",
+                help="Only show products bought by at least this many distinct customers")
+
+    # ── Base fast-mover filter ────────────────────────────────────────────────
     fast = flt[flt['Demand Pattern'].str.replace(' ⚠️','',regex=False).isin(
         ['Stable Fast Mover','Volatile Fast Mover'])].copy()
 
-    # ── Grade filter ─────────────────────────────────────────────────────────
-    _grade_opts = ['All Grades','🔥 A (≥75)','🟢 B (50–74)','🟡 C (25–49)','⚪ — (<25)']
-    _grade_sel  = st.selectbox("Filter by FM Grade", _grade_opts, key="fm_grade")
-    if   _grade_sel == '🔥 A (≥75)':  fast = fast[fast['FM Reorder Score'] >= 75]
-    elif _grade_sel == '🟢 B (50–74)': fast = fast[(fast['FM Reorder Score'] >= 50) & (fast['FM Reorder Score'] < 75)]
-    elif _grade_sel == '🟡 C (25–49)': fast = fast[(fast['FM Reorder Score'] >= 25) & (fast['FM Reorder Score'] < 50)]
-    elif _grade_sel == '⚪ — (<25)':   fast = fast[fast['FM Reorder Score'] < 25]
+    # Apply filters
+    if _fm_pat_sel != 'All':
+        fast = fast[fast['Demand Pattern'] == _fm_pat_sel]
+    if _fm_conc_sel != 'All':
+        fast = fast[fast['Demand Concentration'] == _fm_conc_sel]
+    if _fm_reorder_only:
+        fast = fast[fast['Stock Health'] == 'Reorder Now']
+    if _fm_min_score > 0:
+        fast = fast[fast['FM Reorder Score'] >= _fm_min_score]
+    if _fm_min_vel_f > 0:
+        fast = fast[fast['Sales Velocity/Month'] >= _fm_min_vel_f]
+    if _fm_max_months < 999:
+        fast = fast[fast['Months of Stock'] <= _fm_max_months]
+    if _fm_min_customers > 0:
+        fast = fast[fast['UniqueCustomers'] >= _fm_min_customers]
+
+    # Grade filter
+    if   _fm_grade_sel == '🔥 A (≥75)':   fast = fast[fast['FM Reorder Score'] >= 75]
+    elif _fm_grade_sel == '🟢 B (50–74)':  fast = fast[(fast['FM Reorder Score'] >= 50) & (fast['FM Reorder Score'] < 75)]
+    elif _fm_grade_sel == '🟡 C (25–49)':  fast = fast[(fast['FM Reorder Score'] >= 25) & (fast['FM Reorder Score'] < 50)]
+    elif _fm_grade_sel == '⚪ — (<25)':    fast = fast[fast['FM Reorder Score'] < 25]
+
     fast = fast.sort_values('FM Reorder Score', ascending=False)
 
     # ── KPI row ───────────────────────────────────────────────────────────────
@@ -2021,9 +2089,12 @@ A ⚠️ suffix means demand is concentrated in one or two customers — real vo
 
     _fm_display_cols = [
         'Product No.','Brand Name','Category','Size',
-        'FM Reorder Score','FM Grade',
-        # ── 6 scoring signals ──
-        f'Freq Recent',
+        # ── Two scores side-by-side ──
+        'FM Reorder Score',   # demand quality  (0–100)
+        'Reorder Score',      # supply urgency  (0–100)
+        'FM Grade',
+        # ── 6 FM scoring signals ──
+        'Freq Recent',
         'vs Size Avg %','Size Avg Velocity',
         'Sales Velocity/Month',
         'Demand Concentration','Top Customer %',
@@ -2040,9 +2111,13 @@ A ⚠️ suffix means demand is concentrated in one or two customers — real vo
     st.dataframe(fast[_fm_display_cols], hide_index=True, use_container_width=True)
 
     st.caption(
-        f"**Column guide** — *Freq Recent*: sale frequency in last {_rw_label} days (higher = selling now) | "
-        f"*vs Size Avg %*: how this product's velocity compares to all products in same size (+50% means outsells peers by 50%) | "
-        f"*SaleCV*: lower = more stable order sizes | *Demand Concentration*: Diversified = healthy demand spread"
+        f"**Column guide** — "
+        f"*FM Reorder Score*: demand quality — how strong & consistent this product's sales signal is (0–100) | "
+        f"*Reorder Score*: supply urgency — how soon stock will run out based on current inventory vs. velocity | "
+        f"⚡ Both high = urgent priority reorder | FM high + Reorder low = strong demand, stock still healthy | "
+        f"*Freq Recent*: sale frequency in last {_rw_label} days | "
+        f"*vs Size Avg %*: velocity vs. other products in same size (+50% = outsells peers by 50%) | "
+        f"*SaleCV*: lower = more stable order sizes | *Demand Concentration*: Diversified = healthy customer spread"
     )
     st.download_button("📥 Download Fast Movers",
                        fast[_fm_display_cols].to_csv(index=False),
@@ -2703,10 +2778,45 @@ elif page == "🔍 Search":
         q=query.upper()
         tab1,tab2,tab3=st.tabs(["📦 Products","👤 Customers","📋 Transactions"])
         with tab1:
-            res=pi[pi['Product No.'].str.upper().str.contains(q,na=False)|pi['Brand Name'].str.upper().str.contains(q,na=False)|pi['Category'].str.upper().str.contains(q,na=False)|pi['Size'].str.upper().str.contains(q,na=False)|pi['Company Name'].str.upper().str.contains(q,na=False)].copy()
+            res=pi[
+                pi['Product No.'].str.upper().str.contains(q,na=False) |
+                pi['Brand Name'].str.upper().str.contains(q,na=False)  |
+                pi['Category'].str.upper().str.contains(q,na=False)    |
+                pi['Size'].str.upper().str.contains(q,na=False)        |
+                pi['Company Name'].str.upper().str.contains(q,na=False)
+            ].copy()
             st.caption(f"{len(res)} products found")
             if len(res)>0:
-                disp=['Product No.','Brand Name','Category','Size','Current Stock Sqm','Stock Value PKR','Reorder Score','Sales Velocity/Month','Inventory Status','Stock Health']
+                # Column group selector
+                _col_group = st.radio(
+                    "Show columns",
+                    ["📦 Stock & Status", "✅ Fast Mover", "💰 Revenue & Margin", "🔍 All"],
+                    horizontal=True, key="search_col_grp"
+                )
+
+                _base  = ['Product No.','Brand Name','Category','Size']
+                _stock = ['Current Stock Sqm','Stock Value PKR','WAC Rate',
+                          'Months of Stock','Stock Health','Inventory Status',
+                          'Days Since Last Sale','Sell Through %']
+                _fm    = ['FM Reorder Score','FM Grade','Demand Pattern','Demand Concentration',
+                          'Sales Velocity/Month','Freq','Freq Recent',
+                          'vs Size Avg %','Size Avg Velocity',
+                          'SaleCV','Top Customer %','UniqueCustomers',
+                          'Smart Reorder Sqm','Ghost Score']
+                _rev   = ['Total Revenue','ERP Profit','ERP Margin %',
+                          'Total Sales Sqm','Sales Last 30 Days','Sales Last 90 Days',
+                          'Sales Last 180 Days','Reorder Score','ABC','XYZ','ABC_XYZ']
+
+                if   _col_group == "📦 Stock & Status":  disp = _base + _stock
+                elif _col_group == "✅ Fast Mover":       disp = _base + _fm
+                elif _col_group == "💰 Revenue & Margin": disp = _base + _rev
+                else:                                      disp = _base + _stock + _fm + _rev
+
+                # hide admin columns for non-admins
+                if not is_admin:
+                    disp = [c for c in disp if c not in ['ERP Profit','ERP Margin %','Actual Profit','Actual Margin %','WAC Rate','Stock Value PKR']]
+
+                disp = [c for c in disp if c in res.columns]
                 st.dataframe(res[disp], hide_index=True, use_container_width=True)
                 st.download_button("📥 Download", res[disp].to_csv(index=False), "search_products.csv")
         with tab2:
@@ -5525,42 +5635,51 @@ elif page == "⚔️ Product Showdown":
 elif page == "👻 Ghost Performers":
     if not is_admin: st.error("Admin only."); st.stop()
     st.title("👻 Ghost Performers")
-    with st.expander("ℹ️ About this report", expanded=False):
-        st.markdown('**What it shows:** Products that were fast sellers but are currently out of stock — showing as zero sales, but not because demand dried up.\n\n**Key metrics explained:**\n- **Ghost Score** — True Velocity × Stockout Count ÷ Days Since Last Sale × 100. High score = was selling fast, stocked out multiple times, sold recently. Reorder this first.\n- **True Velocity** — Velocity calculated only during periods when stock was actually available. Removes the distortion of zero-stock periods from the average.\n- **Stockout Count** — How many times this product hit zero inventory. Repeated stockouts mean demand consistently exceeds your purchasing.\n- **Suggested Reorder Sqm** — Recommended quantity to order based on True Velocity × estimated lead time + safety buffer.')
 
-    st.caption("Products that sold well but ran out of stock — hidden from normal reports but worth reordering")
+    _cfg_gp = get_config()
+
+    with st.expander("ℹ️ About this report", expanded=False):
+        st.markdown(f"""
+**What it shows:** Products that sold well historically but have burned through most of their stock — likely to need restocking soon, even if a small residual remains in the warehouse.
+
+**Key metrics explained:**
+- **Ghost Score** — True Velocity × Stockout Count ÷ Days Since Last Sale × 100. Higher = was selling fast, stocked out multiple times, sold recently. Reorder this first.
+- **True Velocity** — Velocity calculated *only during periods when stock was actually available*. Removes the distortion that stockout gaps add to the average.
+- **Stockout Count** — How many times a 30+ day gap appeared between last sale and next purchase — i.e., how many real stockouts it has had.
+- **Sell Through %** — What % of all purchased sqm has already been sold. Qualifies at ≥ {_cfg_gp.get('ghost_min_st_pct',60):.0f}% (configurable in ⚙️ Metrics).
+- **Residual Stock Sqm** — How much is left. Small residual + high sell-through = near-stockout even if not literally zero.
+- **Suggested Reorder Sqm** — True Velocity × 3 months, to cover lead time and safety buffer.
+""")
 
     with st.expander("📖 What is a Ghost Performer?", expanded=False):
         st.markdown("""
 A **Ghost Performer** is a product that:
-1. Was selling well (high velocity)
-2. Ran out of stock (hit zero)
-3. Now shows low/zero sales — not because demand dried up, but because there's nothing to sell
+1. Was selling well (high true velocity when stocked)
+2. Has repeatedly stocked out — 30+ day gaps between last sale and next restock
+3. Has sold through most of what was purchased (≥ Sell Through % threshold)
 
-**Why it matters:** The dashboard's velocity, fast movers, and demand forecast all use recent sales.
-If a product has been out of stock for 2 months, it shows low recent velocity — misleading you into thinking it's slow.
+**Why Sell Through % instead of "out of stock"?**
+Most products aren't sold to zero — there's usually a residual handful of sqm left.
+A product with 500 sqm purchased and 420 sqm sold (84% sell-through) is functionally a ghost
+even if 80 sqm sits in the warehouse. Using sell-through catches these before they hit zero.
 
 **Ghost Score formula:**
 ```
 Ghost Score = True Velocity × Stockout Count / Days Since Last Sale × 100
 ```
-High score = was selling fast + stocked out multiple times + sold recently = definitely worth reordering.
-
-**True Velocity** = velocity calculated only during periods when stock was actually available.
+High score = was fast + stocked out repeatedly + sold recently = reorder immediately.
         """)
 
     st.divider()
 
-    # Get ghost performers from pi
-    ghost = pi[pi['Ghost Score'] > 0].copy()
-    ghost = ghost[ghost['Current Stock Sqm'] <= 0].copy()  # Only out of stock
-    ghost = ghost.sort_values('Ghost Score', ascending=False)
+    # Ghost performers: Ghost Score > 0 (already filtered by sell-through in build_pi)
+    ghost = pi[pi['Ghost Score'] > 0].copy().sort_values('Ghost Score', ascending=False)
 
     if len(ghost) == 0:
-        st.success("No ghost performers detected — all previously fast products are currently in stock.")
+        st.success("No ghost performers detected at the current Sell Through % threshold.")
         st.stop()
 
-    # Filters — row 1: Brand / Category / Size
+    # ── Filters row 1: categorical ────────────────────────────
     fc1,fc2,fc3 = st.columns(3)
     with fc1:
         br_gp  = st.selectbox("Brand",    ['All']+sorted(ghost['Brand Name'].dropna().unique().tolist()), key="gp_br")
@@ -5568,54 +5687,61 @@ High score = was selling fast + stocked out multiple times + sold recently = def
         cat_gp = st.selectbox("Category", ['All']+sorted(ghost['Category'].dropna().unique().tolist()),   key="gp_cat")
     with fc3:
         sz_gp  = st.selectbox("Size",     ['All']+sorted(ghost['Size'].dropna().unique().tolist()),       key="gp_sz")
-
     if br_gp  != 'All': ghost = ghost[ghost['Brand Name'] == br_gp]
     if cat_gp != 'All': ghost = ghost[ghost['Category']   == cat_gp]
     if sz_gp  != 'All': ghost = ghost[ghost['Size']       == sz_gp]
 
-    # Filters — row 2: numeric thresholds
-    c1,c2,c3 = st.columns(3)
+    # ── Filters row 2: numeric ────────────────────────────────
+    c1,c2,c3,c4 = st.columns(4)
     with c1:
-        min_vel = st.number_input("Min True Velocity (sqm/month)", value=50, step=10, key="gp_vel")
+        min_vel  = st.number_input("Min True Velocity (sqm/mo)", value=10, step=5, key="gp_vel")
     with c2:
-        min_so  = st.number_input("Min Stockout Count", value=1, step=1, key="gp_so")
+        min_so   = st.number_input("Min Stockout Count", value=1, step=1, key="gp_so")
     with c3:
-        max_days= st.number_input("Max Days Since Last Sale", value=180, step=30, key="gp_days")
-
+        max_days = st.number_input("Max Days Since Last Sale", value=180, step=30, key="gp_days")
+    with c4:
+        min_st   = st.number_input("Min Sell Through %", value=int(_cfg_gp.get('ghost_min_st_pct',60)),
+                                   step=5, key="gp_st",
+                                   help="Only show ghosts that have already sold this % of purchased qty")
     ghost = ghost[
-        (ghost['True Velocity'] >= min_vel) &
-        (ghost['Stockout Count'] >= min_so) &
+        (ghost['True Velocity']      >= min_vel)  &
+        (ghost['Stockout Count']     >= min_so)   &
         (ghost['Days Since Last Sale'] <= max_days)
     ]
+    if 'Sell Through %' in ghost.columns:
+        ghost = ghost[ghost['Sell Through %'] >= min_st]
 
-    # Metrics
+    # ── KPI row ───────────────────────────────────────────────
     c1,c2,c3,c4 = st.columns(4)
-    c1.metric("Ghost Performers", f"{len(ghost):,}")
-    c2.metric("Avg True Velocity", f"{ghost['True Velocity'].mean():.0f} sqm/mo")
+    c1.metric("Ghost Performers",        f"{len(ghost):,}")
+    c2.metric("Avg True Velocity",       f"{ghost['True Velocity'].mean():.0f} sqm/mo" if len(ghost) else "—")
     c3.metric("Total Suggested Reorder", f"{ghost['Suggested Reorder Sqm'].sum():,.0f} sqm")
     c4.metric("Est. Revenue Opportunity",
-              fmt_m(ghost['Suggested Reorder Sqm'].sum() * ghost['WAC Rate'].mean() * 1.15))
+              fmt_m(ghost['Suggested Reorder Sqm'].sum() * ghost['WAC Rate'].mean() * 1.15) if len(ghost) else "—")
 
     st.divider()
 
-    # ── Reorder Decision Helper ───────────────────────────────
+    # ── Reorder list ──────────────────────────────────────────
     st.subheader("📋 Ghost Performer Reorder List")
     st.caption("Sorted by Ghost Score — highest priority first")
 
-    # Add reorder value estimate
-    ghost['Suggested Reorder Sqm'] = ghost['Suggested Reorder Sqm'].round(1)
-    ghost['Reorder Value (Rs)']    = (ghost['Suggested Reorder Sqm'] * ghost['WAC Rate']).round(0)
-    ghost['Payback (months)']      = (ghost['Suggested Reorder Sqm'] / ghost['True Velocity'].replace(0,np.nan)).round(1)
-    ghost['Priority']              = ghost['Ghost Score'].apply(
-        lambda x: '🔴 High' if x>1000 else ('🟡 Medium' if x>100 else '🟢 Low'))
+    ghost['Reorder Value (Rs)'] = (ghost['Suggested Reorder Sqm'] * ghost['WAC Rate']).round(0)
+    ghost['Payback (months)']   = (ghost['Suggested Reorder Sqm'] / ghost['True Velocity'].replace(0, np.nan)).round(1)
+    ghost['Priority']           = ghost['Ghost Score'].apply(
+        lambda x: '🔴 High' if x > 1000 else ('🟡 Medium' if x > 100 else '🟢 Low'))
 
     disp_cols = ['Product No.','Brand Name','Category','Size',
                  'Priority','Ghost Score','True Velocity','Stockout Count',
-                 'Days Since Last Sale','WAC Rate','Suggested Reorder Sqm',
-                 'Reorder Value (Rs)','Payback (months)']
-
+                 'Sell Through %','Residual Stock Sqm',
+                 'Days Since Last Sale','WAC Rate',
+                 'Suggested Reorder Sqm','Reorder Value (Rs)','Payback (months)']
     st.dataframe(ghost[[c for c in disp_cols if c in ghost.columns]],
                  hide_index=True, use_container_width=True)
+    st.caption(
+        "**Sell Through %** — what % of all purchased sqm has been sold | "
+        "**Residual Stock Sqm** — what's left in the warehouse | "
+        "**Payback (months)** — how quickly the suggested reorder quantity will sell through"
+    )
     st.download_button("📥 Download Reorder List",
                        ghost.to_csv(index=False),
                        "ghost_performers.csv","text/csv",key="gp_dl")
@@ -6060,7 +6186,24 @@ elif page == "⚙️ Metrics Config":
         cfg['liq_disc_4'] = st.number_input("Stage 4 discount %", value=cfg['liq_disc_4'], step=5, key="cfg_liq_p4")
     st.caption(f"≤{cfg['liq_days_1']}d → {cfg['liq_disc_1']}% | ≤{cfg['liq_days_2']}d → {cfg['liq_disc_2']}% | ≤{cfg['liq_days_3']}d → {cfg['liq_disc_3']}% | beyond → {cfg['liq_disc_4']}%")
 
-    # ── Section 10: Fast Mover Scoring ────────────────────────
+    # ── Section 10: Ghost Performer ───────────────────────────
+    st.divider()
+    st.subheader("👻 Ghost Performer Threshold")
+    st.caption("Controls which products qualify as Ghost Performers in the Ghost Performers report")
+    cfg['ghost_min_st_pct'] = st.slider(
+        "Minimum Sell Through % to qualify", 30, 95,
+        int(cfg.get('ghost_min_st_pct', 60)), 5,
+        help="A product must have sold at least this % of its total purchased quantity to appear as a Ghost Performer. "
+             "60% means: if you bought 500 sqm and sold 300+ sqm (60%), it qualifies — even if 200 sqm residual remains. "
+             "Raise this (e.g. 80%) to show only products that are nearly exhausted. "
+             "Lower it (e.g. 40%) to flag products earlier before they run out.",
+        key="cfg_ghost_st")
+    st.caption(
+        f"At {cfg['ghost_min_st_pct']:.0f}%: a product with 500 sqm purchased qualifies once "
+        f"{500 * cfg['ghost_min_st_pct']/100:.0f} sqm has been sold ({500 - 500*cfg['ghost_min_st_pct']/100:.0f} sqm residual or less)"
+    )
+
+    # ── Section 11: Fast Mover Scoring ────────────────────────
     st.divider()
     st.subheader("🔥 Fast Mover Reorder Scoring")
     st.caption("Controls how the FM Reorder Score (0–100) is calculated and what qualifies as a fast mover")
